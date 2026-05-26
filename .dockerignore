@@ -1,0 +1,25 @@
+# Build context lives at the repo root for both control and agent images
+# (the workspace lockfile + workspace pyproject sit there). Trim everything
+# that doesn't influence the image so layer cache stays warm.
+
+.git
+.github
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+.env
+.env.*
+
+docker-compose*.yml
+
+# Tests are not needed inside the image. The Dockerfile only copies
+# `packages/*/src` so this is belt-and-braces.
+**/tests
+
+# Authored docs — not referenced by the build.
+README.md
+CHANGELOG.md
+CONTEXT.md
