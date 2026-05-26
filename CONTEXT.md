@@ -221,23 +221,46 @@ via two opaque tokens (#8):
   follow-up; until it lands keep the broker on a private network.
 
 **Management-plane deployment.** `docker-compose.yml` at the repo root
-brings up the six-service management plane on the VPS:
+brings up the seven-service management plane on the VPS:
 `caddy` (TLS reverse proxy on `${ADMIN_DOMAIN}`, ACME-issued cert,
 ACME state on a named volume), `postgres` (named volume, healthcheck),
-`nats` (internal-only — no host port until auth lands in #8),
-`axis-control` (image from GHCR, wired to `postgres` + `nats` by
-service DNS, no host port — caddy is the only ingress),
-`vmsingle` (VictoriaMetrics single-node, named volume), and
-`grafana` (admin password from env, named volume). Operator workflow:
+`nats` (internal-only — no host port until NATS connection-level auth
+lands), `axis-control` (image from GHCR, wired to `postgres` + `nats`
+by service DNS, no host port — caddy is the only ingress),
+`vmsingle` (VictoriaMetrics single-node, named volume),
+`grafana` (admin password from env, named volume), and
+`backup` (image from GHCR, daily pg_dump + vmsingle snapshot uploaded
+to S3-compatible storage — see "Backup" below). Operator workflow:
 `cp .env.example .env`, fill the required secrets, `docker compose
 up -d`. Verified by `tests/test_production_compose.py`: static checks
 (marker `production_compose`) parse the rendered config and assert
 each service's image / volumes / ports / wiring; the slower
 `production_compose_integration` tests bring the stack up, exercise
 `caddy → axis-control:/healthz`, and confirm postgres data survives
-`down && up`. Grafana provisioning, the full operator-facing Caddyfile
-(grafana routing, basic auth, etc.), and the backup story for the
-postgres + vmsingle volumes are follow-ups.
+`down && up`. Grafana provisioning and the full operator-facing
+Caddyfile (grafana routing, basic auth, etc.) are follow-ups.
+
+**Backup.** The `backup` sidecar (#18) runs a cron loop on the
+management VPS — default schedule `0 2 * * *` UTC, override via
+`AXIS_BACKUP_CRON`. Each tick: pg_dumps the control DB over the
+docker network (creds reused from the same `POSTGRES_*` env the
+database itself uses, so they cannot drift), asks `vmsingle` to take
+a snapshot via `POST /snapshot/create`, tars the snapshot dir from
+the read-mounted `axis_vmsingle_data` volume, then uploads both
+artifacts to an S3-compatible bucket via `aws s3 cp --endpoint-url`.
+Bucket target in production is Timeweb Cloud S3
+(`https://s3.timeweb.cloud`); any S3-compatible endpoint works. A
+local rolling buffer on a dedicated `axis_backup_data` named volume
+keeps `AXIS_BACKUP_LOCAL_RETENTION_DAYS` (default 7) days of
+snapshots so a fat-fingered `docker compose down -v` is recoverable
+without a remote pull. Remote retention is a bucket lifecycle rule
+the operator sets on Timeweb — the image deliberately has no S3
+delete permission. Encryption is delegated to the bucket's at-rest
+encryption; a follow-up can layer `age`/`sops` if the threat model
+shifts. Image source at `packages/backup/{Dockerfile,backup.sh}`,
+published to GHCR as `ghcr.io/axisaiblr/axis-backup`. Restore is a
+manual flow documented in `.env.example`; an automated
+restore-roundtrip integration test is a follow-up.
 
 ## What's in motion (open issues)
 

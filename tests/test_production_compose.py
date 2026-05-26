@@ -36,8 +36,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 CONTROL_DOCKERFILE = REPO_ROOT / "packages" / "control" / "Dockerfile"
+BACKUP_DOCKERFILE = REPO_ROOT / "packages" / "backup" / "Dockerfile"
 INTEGRATION_IMAGE_TAG = "integration-test"
 INTEGRATION_FULL_IMAGE = f"ghcr.io/axisaiblr/axis-control:{INTEGRATION_IMAGE_TAG}"
+INTEGRATION_BACKUP_IMAGE = f"ghcr.io/axisaiblr/axis-backup:{INTEGRATION_IMAGE_TAG}"
 
 # Default marker for everything in this file. Individual integration
 # tests opt in to the heavier marker as well.
@@ -76,6 +78,7 @@ EXPECTED_SERVICES = {
     "axis-control",
     "vmsingle",
     "grafana",
+    "backup",
 }
 
 
@@ -284,6 +287,189 @@ def test_nats_is_internal_only_with_restart_policy() -> None:
     )
 
 
+def test_backup_service_is_declared() -> None:
+    """Tracer for the backup story (#18): the production stack must
+    declare a `backup` service. Everything else about it — image,
+    volumes, env wiring — is asserted by the dedicated tests below.
+    This one only catches a missing service stanza."""
+    config = _compose_config()
+    assert "backup" in config["services"], (
+        "production stack is missing the `backup` service — postgres "
+        "+ vmsingle volumes have no scheduled snapshot story (#18)"
+    )
+
+
+def test_backup_uses_ghcr_image_and_restart_policy() -> None:
+    """The backup sidecar runs from our own GHCR image (built from
+    packages/backup/Dockerfile) and restarts unless explicitly
+    stopped — without `unless-stopped` a host reboot would leave the
+    fleet running with no scheduled snapshots and no operator alert."""
+    config = _compose_config()
+    backup = _service(config, "backup")
+    assert backup["image"].startswith("ghcr.io/axisaiblr/axis-backup"), (
+        f"backup image must come from our GHCR namespace (consistent "
+        f"with axis-control / axis-agent), got {backup['image']!r}"
+    )
+    assert backup.get("restart") == "unless-stopped", (
+        "backup must restart=unless-stopped so a host reboot does not "
+        "silently stop the scheduled snapshot loop"
+    )
+
+
+def test_backup_can_reach_postgres_and_read_vmsingle_volume() -> None:
+    """The backup sidecar needs two inputs: an authenticated pg_dump
+    connection to postgres, and read access to the vmsingle data
+    directory so it can package the snapshot the VictoriaMetrics HTTP
+    API drops there.
+
+    `depends_on: postgres` ensures the database is running before the
+    sidecar's first scheduled tick — pg_dump retries its own connect
+    loop internally, so service_started is enough.
+
+    `axis_vmsingle_data` must mount read-only — the backup process
+    only reads snapshot dirs created by vmsingle; never writes."""
+    config = _compose_config()
+    backup = _service(config, "backup")
+
+    deps = _depends_on(backup)
+    assert "postgres" in deps, (
+        "backup must depends_on postgres — pg_dump needs the database "
+        "service running before the first scheduled tick"
+    )
+
+    vmsingle_mount = None
+    for entry in backup.get("volumes", []):
+        if isinstance(entry, dict) and entry.get("source") == "axis_vmsingle_data":
+            vmsingle_mount = entry
+            break
+    assert vmsingle_mount is not None, (
+        "backup must mount axis_vmsingle_data so it can read the "
+        "vmsingle snapshot directory for tar/upload"
+    )
+    assert vmsingle_mount.get("read_only") is True, (
+        "axis_vmsingle_data must be mounted read-only on the backup "
+        "service — the backup process only reads vmsingle's snapshots, "
+        f"never writes; got {vmsingle_mount!r}"
+    )
+
+
+def test_backup_has_writable_local_snapshot_volume() -> None:
+    """The backup sidecar keeps a small rolling buffer of recent
+    snapshots locally on a dedicated named volume. This recovers from
+    the most common failure mode — a fat-fingered `docker compose
+    down -v` on the management VPS — without waiting on a download
+    from the offsite bucket.
+
+    The volume must be declared at the top-level `volumes:` block (so
+    it survives `docker compose down`) and mounted writable on backup."""
+    config = _compose_config()
+    backup = _service(config, "backup")
+
+    local_mount = None
+    for entry in backup.get("volumes", []):
+        if isinstance(entry, dict) and entry.get("source") == "axis_backup_data":
+            local_mount = entry
+            break
+    assert local_mount is not None, (
+        "backup must mount axis_backup_data — without a local rolling "
+        "buffer a `docker compose down -v` wipes every recent snapshot"
+    )
+    assert local_mount.get("read_only") is not True, (
+        "axis_backup_data must be writable on backup — the sidecar "
+        "writes its rolling snapshots here"
+    )
+
+    declared_volumes = config.get("volumes", {}) or {}
+    assert "axis_backup_data" in declared_volumes, (
+        "axis_backup_data is not declared in the top-level volumes: "
+        "block; without it docker creates an anonymous volume on every "
+        "`up` and the rolling buffer is lost on `down`"
+    )
+
+
+def _service_env(service: dict) -> dict[str, str]:
+    """Normalise the service environment (dict or KEY=VAL list) to a
+    plain dict. Mirrors the helper inline in the axis-control test."""
+    env = service.get("environment") or {}
+    if isinstance(env, list):
+        env = dict(item.split("=", 1) for item in env)
+    return env
+
+
+def test_backup_credentials_threaded_from_env_no_hardcoded() -> None:
+    """S3 credentials for the offsite copy and postgres credentials for
+    pg_dump both come from the host `.env`. None of these may be
+    hard-coded into the image or the compose file:
+
+      * S3 keys leaking into git would let a third party empty the
+        backup bucket.
+      * Postgres creds must reuse the same POSTGRES_* values the
+        database itself uses — if they ever diverge, pg_dump silently
+        starts failing while compose-up continues to look healthy."""
+    config = _compose_config()
+    backup = _service(config, "backup")
+    env = _service_env(backup)
+
+    # Offsite — Timeweb S3 endpoint + bucket + per-prefix scoping. All
+    # mandatory; without an endpoint the aws-cli would default to AWS.
+    assert env.get("AXIS_BACKUP_S3_ENDPOINT"), (
+        "AXIS_BACKUP_S3_ENDPOINT must be set — without it the aws-cli "
+        "defaults to AWS instead of the configured S3-compatible target"
+    )
+    assert env.get("AXIS_BACKUP_S3_BUCKET"), (
+        "AXIS_BACKUP_S3_BUCKET must be set — there is no sensible default"
+    )
+    assert env.get("AXIS_BACKUP_S3_ACCESS_KEY_ID"), (
+        "AXIS_BACKUP_S3_ACCESS_KEY_ID must be threaded from .env"
+    )
+    assert env.get("AXIS_BACKUP_S3_SECRET_ACCESS_KEY"), (
+        "AXIS_BACKUP_S3_SECRET_ACCESS_KEY must be threaded from .env"
+    )
+
+    # Postgres creds must point at the same postgres service this
+    # stack runs — drift between POSTGRES_USER on the db side and the
+    # value the backup uses would silently break pg_dump.
+    assert env.get("AXIS_BACKUP_POSTGRES_HOST") == "postgres", (
+        "backup must connect to postgres by service DNS, got "
+        f"{env.get('AXIS_BACKUP_POSTGRES_HOST')!r}"
+    )
+    assert env.get("AXIS_BACKUP_POSTGRES_USER"), (
+        "backup needs POSTGRES_USER threaded — pg_dump connects with it"
+    )
+    assert env.get("AXIS_BACKUP_POSTGRES_PASSWORD"), (
+        "backup needs POSTGRES_PASSWORD threaded — pg_dump authenticates "
+        "with it"
+    )
+    assert env.get("AXIS_BACKUP_POSTGRES_DB"), (
+        "backup needs POSTGRES_DB threaded — pg_dump targets it"
+    )
+
+
+def test_backup_schedule_and_retention_have_sane_defaults() -> None:
+    """An operator who does not set AXIS_BACKUP_CRON or
+    AXIS_BACKUP_LOCAL_RETENTION_DAYS in their .env should still get a
+    working stack: daily snapshots at 02:00 UTC, 7 rolling local
+    copies. These are the most asked-about config knobs but also the
+    ones where a missing value would silently mean "no schedule" or
+    "infinite local retention until the disk fills" — both are worse
+    than a hard-coded default."""
+    config = _compose_config()
+    backup = _service(config, "backup")
+    env = _service_env(backup)
+
+    cron = env.get("AXIS_BACKUP_CRON")
+    assert cron == "0 2 * * *", (
+        "backup must default to a daily 02:00 UTC schedule when "
+        f"AXIS_BACKUP_CRON is unset, got {cron!r}"
+    )
+
+    retention = env.get("AXIS_BACKUP_LOCAL_RETENTION_DAYS")
+    assert retention == "7", (
+        "backup must default to 7 local rolling snapshots when "
+        f"AXIS_BACKUP_LOCAL_RETENTION_DAYS is unset, got {retention!r}"
+    )
+
+
 def test_postgres_has_persistent_volume_and_healthcheck() -> None:
     """Postgres data must live on a named volume (so a `docker compose
     down && up` does not wipe the row history) and must expose a
@@ -309,7 +495,7 @@ def test_postgres_has_persistent_volume_and_healthcheck() -> None:
 
 
 def test_declares_expected_services() -> None:
-    """The management plane is six services. Any drift here is a
+    """The management plane is seven services. Any drift here is a
     behaviour change worth seeing in a diff: a missing service means
     deploys will lose a capability; an unexpected service means we're
     shipping something nobody designed for."""
@@ -361,30 +547,48 @@ def _free_host_port() -> int:
         return sock.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def axis_control_image() -> str:
-    """Build the control-plane image locally and tag it as the value the
-    production compose will look for when AXIS_CONTROL_IMAGE_TAG is set
-    to `integration-test`. Session-scoped so the cost is paid once."""
+def _build_image_or_fail(dockerfile: Path, tag: str, name: str) -> str:
+    """Shared helper used by the per-image session fixtures below."""
     if not _docker_daemon_available():
         pytest.skip("docker daemon not reachable")
-    if not CONTROL_DOCKERFILE.exists():
-        pytest.fail(f"missing {CONTROL_DOCKERFILE}")
+    if not dockerfile.exists():
+        pytest.fail(f"missing {dockerfile}")
     proc = subprocess.run(
         [
             "docker", "build",
-            "-f", str(CONTROL_DOCKERFILE),
-            "-t", INTEGRATION_FULL_IMAGE,
+            "-f", str(dockerfile),
+            "-t", tag,
             str(REPO_ROOT),
         ],
         capture_output=True, text=True, timeout=900,
     )
     if proc.returncode != 0:
         pytest.fail(
-            "axis-control image build failed:\n"
+            f"{name} image build failed:\n"
             f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
         )
-    return INTEGRATION_FULL_IMAGE
+    return tag
+
+
+@pytest.fixture(scope="session")
+def axis_control_image() -> str:
+    """Build the control-plane image locally and tag it as the value the
+    production compose will look for when AXIS_CONTROL_IMAGE_TAG is set
+    to `integration-test`. Session-scoped so the cost is paid once."""
+    return _build_image_or_fail(
+        CONTROL_DOCKERFILE, INTEGRATION_FULL_IMAGE, "axis-control"
+    )
+
+
+@pytest.fixture(scope="session")
+def axis_backup_image() -> str:
+    """Same idea for the backup sidecar (#18). The image is referenced
+    by the production compose but not yet published to GHCR during a
+    feature branch's CI run — build locally and tag it under the same
+    `integration-test` rule the axis-control fixture uses."""
+    return _build_image_or_fail(
+        BACKUP_DOCKERFILE, INTEGRATION_BACKUP_IMAGE, "axis-backup"
+    )
 
 
 def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
@@ -399,6 +603,7 @@ def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
                 "POSTGRES_PASSWORD=integration-pw",
                 "POSTGRES_DB=axis",
                 "GRAFANA_ADMIN_PASSWORD=integration-pw",
+                "AXIS_CONTROL_REGISTRATION_TOKEN=integration-token",
                 f"AXIS_CONTROL_IMAGE_TAG={INTEGRATION_IMAGE_TAG}",
                 # `http://` scheme opts Caddy out of auto-HTTPS — there
                 # is no ACME-issuable cert for `localhost` and we don't
@@ -407,6 +612,18 @@ def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
                 # automatically.
                 "ADMIN_DOMAIN=http://localhost",
                 f"CADDY_HOST_PORT={caddy_host_port}",
+                # Backup sidecar (#18). The schedule defaults to daily
+                # 02:00 UTC and will never fire inside the test window,
+                # but the entrypoint validates these env vars at
+                # container start — they must be set (and non-empty)
+                # or the container exits with code 1 and `--wait`
+                # never reports the stack healthy. The endpoint is
+                # deliberately unreachable to avoid surprise S3 calls.
+                f"AXIS_BACKUP_IMAGE_TAG={INTEGRATION_IMAGE_TAG}",
+                "AXIS_BACKUP_S3_ENDPOINT=http://nonexistent.invalid",
+                "AXIS_BACKUP_S3_BUCKET=integration-bucket",
+                "AXIS_BACKUP_S3_ACCESS_KEY_ID=integration-key",
+                "AXIS_BACKUP_S3_SECRET_ACCESS_KEY=integration-secret",
             ]
         )
         + "\n",
@@ -420,8 +637,10 @@ def _write_integration_override(tmpdir: Path) -> Path:
       * publishes caddy on a kernel-chosen high port (not 80/443),
         so the test does not collide with anything on the host and
         does not need root.
-      * sets pull_policy=never on axis-control so docker compose uses
-        the locally-tagged image instead of trying to GET it from GHCR.
+      * sets pull_policy=never on axis-control and backup so docker
+        compose uses the locally-built and locally-tagged images
+        instead of trying to GET them from GHCR (the backup image is
+        new on a feature branch and would not yet be published).
     """
     override = tmpdir / "docker-compose.override.yml"
     override.write_text(
@@ -431,6 +650,8 @@ services:
     ports: !override
       - "127.0.0.1:${CADDY_HOST_PORT}:80"
   axis-control:
+    pull_policy: never
+  backup:
     pull_policy: never
 """,
         encoding="utf-8",
@@ -491,6 +712,7 @@ class _Stack:
 @pytest.fixture
 def integration_stack(
     axis_control_image: str,
+    axis_backup_image: str,
     tmp_path: Path,
 ) -> Iterator[_Stack]:
     """One stack per test. Slow but isolated — failures in one test do
@@ -545,7 +767,7 @@ def _retry_get(
 
 @pytest.mark.production_compose_integration
 def test_volumes_persist_across_stack_restart(
-    axis_control_image: str, tmp_path: Path
+    axis_control_image: str, axis_backup_image: str, tmp_path: Path
 ) -> None:
     """Postgres' data volume is named (not anonymous), so a `docker
     compose down && up` keeps every row the operator created. This
@@ -582,7 +804,13 @@ def test_volumes_persist_across_stack_restart(
                         "project_name": "persistence-probe",
                         "hostname": "persistence-host-1",
                     },
-                    headers={"Host": host_header},
+                    headers={
+                        "Host": host_header,
+                        # Registration is gated by the bootstrap token
+                        # (#8); the env file wires the same token into
+                        # the control-plane container.
+                        "Authorization": "Bearer integration-token",
+                    },
                     timeout=5.0,
                 )
                 if r.status_code == 201:

@@ -89,6 +89,58 @@ services:
       - axis_vmsingle_data:/victoria-metrics-data
     # No `ports:` — grafana queries vmsingle on the internal network.
 
+  backup:
+    # Daily pg_dump + vmsingle snapshot, uploaded to S3-compatible
+    # storage (Timeweb in production). Configured fully via the new
+    # AXIS_BACKUP_* env vars — see .env.example. See #18.
+    image: ghcr.io/axisaiblr/axis-backup:${AXIS_BACKUP_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      # pg_dump retries its own connect loop, so service_started is
+      # enough — we just need the postgres process to be up by the
+      # time the first scheduled tick fires.
+      - postgres
+    volumes:
+      # Read the vmsingle snapshot dir to tar it up. Read-only because
+      # the backup process never writes back into vmsingle's storage.
+      - type: volume
+        source: axis_vmsingle_data
+        target: /var/lib/vmsingle
+        read_only: true
+      # Rolling buffer of recent local snapshots. The image's
+      # entrypoint trims this to AXIS_BACKUP_LOCAL_RETENTION_DAYS files
+      # after each successful run, so an honest mistake (`docker compose
+      # down -v` minus the `-v`, a botched manual restore) is recoverable
+      # without pulling from the offsite bucket.
+      - axis_backup_data:/var/lib/axis-backup
+    environment:
+      # Postgres connection — reuse the same POSTGRES_* values the
+      # database itself uses, so the two cannot drift. pg_dump
+      # authenticates over the docker network.
+      AXIS_BACKUP_POSTGRES_HOST: postgres
+      AXIS_BACKUP_POSTGRES_PORT: "5432"
+      AXIS_BACKUP_POSTGRES_USER: ${POSTGRES_USER:-axis}
+      AXIS_BACKUP_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AXIS_BACKUP_POSTGRES_DB: ${POSTGRES_DB:-axis}
+      # VictoriaMetrics snapshot API. Local URL on the docker network;
+      # no auth (vmsingle does not expose host-side anyway).
+      AXIS_BACKUP_VMSINGLE_URL: http://vmsingle:8428
+      AXIS_BACKUP_VMSINGLE_SNAPSHOT_DIR: /var/lib/vmsingle/snapshots
+      # Offsite S3 target. Endpoint, bucket, and per-stack object
+      # prefix all come from .env so a deploy can point at any
+      # S3-compatible bucket (production: Timeweb Cloud S3).
+      AXIS_BACKUP_S3_ENDPOINT: ${AXIS_BACKUP_S3_ENDPOINT}
+      AXIS_BACKUP_S3_BUCKET: ${AXIS_BACKUP_S3_BUCKET}
+      AXIS_BACKUP_S3_PREFIX: ${AXIS_BACKUP_S3_PREFIX:-axis-control}
+      AXIS_BACKUP_S3_ACCESS_KEY_ID: ${AXIS_BACKUP_S3_ACCESS_KEY_ID}
+      AXIS_BACKUP_S3_SECRET_ACCESS_KEY: ${AXIS_BACKUP_S3_SECRET_ACCESS_KEY}
+      AXIS_BACKUP_S3_REGION: ${AXIS_BACKUP_S3_REGION:-ru-1}
+      # Schedule + local retention. Defaults baked in so an operator
+      # who only sets S3 creds still gets a working backup story:
+      # daily 02:00 UTC, 7 rolling local snapshots.
+      AXIS_BACKUP_CRON: ${AXIS_BACKUP_CRON:-0 2 * * *}
+      AXIS_BACKUP_LOCAL_RETENTION_DAYS: ${AXIS_BACKUP_LOCAL_RETENTION_DAYS:-7}
+
   grafana:
     image: grafana/grafana:11.3.0
     restart: unless-stopped
@@ -111,3 +163,4 @@ volumes:
   axis_caddy_config:
   axis_vmsingle_data:
   axis_grafana_data:
+  axis_backup_data:
