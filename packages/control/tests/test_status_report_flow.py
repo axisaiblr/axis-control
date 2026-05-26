@@ -60,4 +60,4 @@ async def test_agent_status_report_completes_command_and_disables_instance(
 
     instance_resp = await api_client.get(f"/api/instances/{instance.id}")
     assert instance_resp.status_code == 200
-    assert instance_resp.json()["status"] == "disabled"
+    assert instance_resp.json()["workload_state"] == "disabled"

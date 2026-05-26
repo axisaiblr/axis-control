@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import asyncpg
 from fastapi import FastAPI
 from nats.aio.client import Client as NatsClient
@@ -21,6 +23,7 @@ def create_app(
     db_pool: asyncpg.Pool,
     nats_client: NatsClient,
     publish_probe_timeout: float = 0.1,
+    heartbeat_stale_seconds: float = 30.0,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -48,6 +51,9 @@ def create_app(
     )
     app.state.registration_service = RegistrationService(
         projects_repo=projects_repo, instances_repo=instances_repo
+    )
+    app.state.heartbeat_stale_after = timedelta(
+        seconds=heartbeat_stale_seconds
     )
 
     app.include_router(commands_router)
