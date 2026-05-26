@@ -31,3 +31,19 @@ class ControlSettings(BaseSettings):
     http_host: str = Field(default="0.0.0.0")
     http_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
+    command_timeout_seconds: float = Field(
+        default=60.0,
+        description="Wait this long for an agent acknowledgement before "
+        "marking a pending command as failed.",
+    )
+    command_sweep_interval_seconds: float = Field(
+        default=5.0,
+        description="How often the timeout sweeper scans for stuck "
+        "pending commands.",
+    )
+    nats_publish_probe_timeout: float = Field(
+        default=0.1,
+        description="Per-publish timeout used to detect 'no listeners' "
+        "via NATS request/no-responders. Sets a lower bound on the "
+        "happy-path publish latency.",
+    )

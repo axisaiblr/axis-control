@@ -64,7 +64,15 @@ synonyms; if a new concept appears, add it here.
 - **Command** — an operator-initiated action targeted at one instance
   (`disable`, `enable`). A row in `commands`. Has a status.
 - **Status report** — message published by an agent on `status.<id>`
-  to announce the outcome of a command.
+  to announce the outcome of a command. Only applied if the command is
+  still pending; late reports are logged and ignored.
+- **Delivery hint** — best-effort indicator returned on
+  `POST .../commands` (`delivered_now` / `no_listeners` / `unknown`).
+  Captured via a short NATS request probe at publish time. Informational
+  only; the persisted row is the source of truth.
+- **Timeout sweeper** — background task that fails pending commands
+  older than `command_timeout_seconds` with the stable reason
+  `no_acknowledgement_within_timeout`. Does not change instance state.
 - **Heartbeat** *(planned, #3)* — periodic liveness signal published by
   the agent on `heartbeat.<id>`. Drives the reachability axis of the
   instance state.
@@ -128,12 +136,9 @@ Agent deep modules: `identity.AgentIdentityStore` (file-backed JSON),
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
 
-Two remaining `ready-for-agent` items from the first round of real
-usage. Each carries its own agent brief; any of them can be picked up
-independently. Recommended landing order: #3 → #2.
+One remaining `ready-for-agent` item from the first round of real
+usage:
 
-- **#2** *(bug)* — commands published with no subscriber stay pending
-  forever; needs timeout + delivery hint.
 - **#3** *(enhancement)* — split instance status into reachability
   (heartbeat-driven) and workload state (operator intent).
 

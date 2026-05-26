@@ -5,7 +5,11 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
-from axis_control.domain.commands import CommandStatus, CommandType
+from axis_control.domain.commands import (
+    CommandStatus,
+    CommandType,
+    DeliveryHint,
+)
 
 
 class IssueCommandRequest(BaseModel):
@@ -17,6 +21,18 @@ class CommandResponse(BaseModel):
     instance_id: UUID
     type: CommandType
     status: CommandStatus
+    failure_reason: str | None = None
+
+
+class IssueCommandResponse(CommandResponse):
+    """Response shape for `POST /api/instances/{id}/commands`.
+
+    Adds a best-effort `delivery` hint captured at publish time. The hint
+    is informational — a `no_listeners` response still persists the
+    command and still arms the timeout sweeper.
+    """
+
+    delivery: DeliveryHint
 
 
 router = APIRouter()
@@ -25,20 +41,23 @@ router = APIRouter()
 @router.post(
     "/api/instances/{instance_id}/commands",
     status_code=status.HTTP_202_ACCEPTED,
-    response_model=CommandResponse,
+    response_model=IssueCommandResponse,
 )
 async def issue_command(
     instance_id: UUID,
     payload: IssueCommandRequest,
     request: Request,
-) -> CommandResponse:
+) -> IssueCommandResponse:
     dispatcher = request.app.state.command_dispatcher
-    command = await dispatcher.dispatch(instance_id, payload.type)
-    return CommandResponse(
+    result = await dispatcher.dispatch(instance_id, payload.type)
+    command = result.command
+    return IssueCommandResponse(
         id=command.id,
         instance_id=command.instance_id,
         type=command.type,
         status=command.status,
+        failure_reason=command.failure_reason,
+        delivery=result.delivery,
     )
 
 
@@ -53,4 +72,5 @@ async def get_command(command_id: UUID, request: Request) -> CommandResponse:
         instance_id=command.instance_id,
         type=command.type,
         status=command.status,
+        failure_reason=command.failure_reason,
     )

@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Command timeout sweeper: pending commands now reach a terminal `failed`
+  state within a bounded time even when no agent ever consumes the NATS
+  message. New `commands.failure_reason` column carries a stable token
+  (`no_acknowledgement_within_timeout`) that UI and tooling can match on.
+  Instance status is *not* inferred from a timeout — only the command
+  row is finalised. Configured via
+  `AXIS_CONTROL_COMMAND_TIMEOUT_SECONDS` (default 60) and
+  `AXIS_CONTROL_COMMAND_SWEEP_INTERVAL_SECONDS` (default 5).
+- Delivery hint on command dispatch: `POST /api/instances/{id}/commands`
+  now returns a `delivery` field — `delivered_now` when a subscriber was
+  reachable at publish time, `no_listeners` when the NATS broker reported
+  no responders, `unknown` on transient publish errors. Implemented via a
+  short-lived NATS request probe configured by
+  `AXIS_CONTROL_NATS_PUBLISH_PROBE_TIMEOUT` (default 0.1 s).
 - `axis-agent` self-registration: on first start, the agent calls
   `POST /api/instances` itself using `AXIS_AGENT_PROJECT_NAME` and
   `AXIS_AGENT_HOSTNAME` (defaults to OS hostname), persists the
@@ -50,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   selected by `AXIS_AGENT_COMPOSE_MODE`.
 
 ### Changed
+- Inbound status reports are now ignored when the targeted command is
+  already in a terminal state. Terminal means terminal: a late
+  `completed` from an agent that came online after the timeout fired
+  does not resurrect a `failed` row or flip the instance status. The
+  late report is logged at WARNING level as an anomaly.
 - `axis-agent` required env: `AXIS_AGENT_INSTANCE_ID` is no longer
   mandatory. The agent now requires `AXIS_AGENT_PROJECT_NAME` and
   `AXIS_AGENT_CONTROL_PLANE_URL`. `AXIS_AGENT_INSTANCE_ID` is still
