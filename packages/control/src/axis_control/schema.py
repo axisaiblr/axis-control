@@ -21,9 +21,34 @@ CREATE TABLE IF NOT EXISTS instances (
     project_id UUID NOT NULL REFERENCES projects(id),
     project_name TEXT NOT NULL,
     hostname TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    workload_state TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    last_heartbeat_at TIMESTAMPTZ
 );
+
+-- Migration from pre-#3 schema: single `status` column carrying
+-- {unknown,running,disabled} → split into `workload_state`
+-- ({unknown,enabled,disabled}) plus the heartbeat-derived reachability.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'instances' AND column_name = 'status'
+    ) THEN
+        ALTER TABLE instances
+            ADD COLUMN IF NOT EXISTS workload_state TEXT;
+        UPDATE instances
+        SET workload_state = CASE status
+            WHEN 'running' THEN 'enabled'
+            ELSE status
+        END
+        WHERE workload_state IS NULL;
+        ALTER TABLE instances ALTER COLUMN workload_state SET NOT NULL;
+        ALTER TABLE instances DROP COLUMN status;
+    END IF;
+END$$;
+
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS commands (
     id UUID PRIMARY KEY,
@@ -31,8 +56,11 @@ CREATE TABLE IF NOT EXISTS commands (
     type TEXT NOT NULL,
     status TEXT NOT NULL,
     issued_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    failure_reason TEXT
 );
+
+ALTER TABLE commands ADD COLUMN IF NOT EXISTS failure_reason TEXT;
 """
 
 

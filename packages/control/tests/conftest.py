@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from testcontainers.postgres import PostgresContainer
 
+from axis_control.adapters.nats_heartbeat import HeartbeatSubscriber
 from axis_control.adapters.nats_subscriber import StatusSubscriber
 from axis_control.api.app import create_app
 from axis_control.domain.commands import (
@@ -18,6 +19,7 @@ from axis_control.domain.commands import (
 )
 from axis_control.domain.models import Instance, new_instance, new_project
 from axis_control.schema import SCHEMA_DDL
+from axis_control.services.command_sweeper import CommandTimeoutSweeper
 from axis_control.services.status_handler import StatusHandler
 
 # Mirror of packages/conftest.py HOST — pytest conftests aren't importable.
@@ -65,13 +67,31 @@ async def api_client(
         nats_url, connect_timeout=2, max_reconnect_attempts=1
     )
     try:
-        app = create_app(db_pool=db_pool, nats_client=app_nc)
+        # Short probe timeout keeps the no-listener happy-path test snappy;
+        # a short command timeout + sweep interval keeps the timeout
+        # regression tests under a few seconds.
+        app = create_app(
+            db_pool=db_pool,
+            nats_client=app_nc,
+            publish_probe_timeout=0.05,
+            heartbeat_stale_seconds=1.0,
+        )
         handler = StatusHandler(
             commands_repo=app.state.commands_repo,
             instances_repo=app.state.instances_repo,
         )
         subscriber = StatusSubscriber(app_nc, handler)
         await subscriber.start()
+        heartbeat_subscriber = HeartbeatSubscriber(
+            app_nc, app.state.instances_repo
+        )
+        await heartbeat_subscriber.start()
+        sweeper = CommandTimeoutSweeper(
+            commands_repo=app.state.commands_repo,
+            timeout_seconds=2.0,
+            sweep_interval_seconds=0.1,
+        )
+        await sweeper.start()
         try:
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -79,6 +99,8 @@ async def api_client(
             ) as client:
                 yield client
         finally:
+            await sweeper.stop()
+            await heartbeat_subscriber.stop()
             await subscriber.stop()
     finally:
         await app_nc.drain()
@@ -102,13 +124,14 @@ async def given_registered_instance(
             )
             await conn.execute(
                 "INSERT INTO instances "
-                "(id, project_id, project_name, hostname, status, created_at) "
+                "(id, project_id, project_name, hostname, workload_state, "
+                "created_at) "
                 "VALUES ($1, $2, $3, $4, $5, $6)",
                 instance.id,
                 instance.project_id,
                 instance.project_name,
                 instance.hostname,
-                instance.status.value,
+                instance.workload_state.value,
                 instance.created_at,
             )
         return instance

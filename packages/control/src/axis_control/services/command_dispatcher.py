@@ -3,7 +3,13 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from axis_control.domain.commands import Command, CommandType, new_command
+from axis_control.domain.commands import (
+    Command,
+    CommandType,
+    DeliveryHint,
+    DispatchResult,
+    new_command,
+)
 
 
 class CommandsRepoPort(Protocol):
@@ -11,14 +17,15 @@ class CommandsRepoPort(Protocol):
 
 
 class CommandPublisherPort(Protocol):
-    async def publish(self, command: Command) -> None: ...
+    async def publish(self, command: Command) -> DeliveryHint: ...
 
 
 class CommandDispatcher:
     """Persist the command first, then publish to NATS.
 
-    Order matters: a persisted but un-published command is recoverable; a
-    published but un-persisted command would be invisible to the admin UI.
+    Order matters: a persisted but un-published command is recoverable
+    (the timeout sweeper will fail it explicitly); a published but
+    un-persisted command would be invisible to the admin UI.
     """
 
     def __init__(
@@ -29,8 +36,10 @@ class CommandDispatcher:
         self._repo = repo
         self._publisher = publisher
 
-    async def dispatch(self, instance_id: UUID, type_: CommandType) -> Command:
+    async def dispatch(
+        self, instance_id: UUID, type_: CommandType
+    ) -> DispatchResult:
         command = new_command(instance_id=instance_id, type_=type_)
         await self._repo.save_pending(command)
-        await self._publisher.publish(command)
-        return command
+        delivery = await self._publisher.publish(command)
+        return DispatchResult(command=command, delivery=delivery)

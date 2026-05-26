@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
-from axis_control.domain.models import InstanceStatus
+from axis_control.domain.models import (
+    Instance,
+    Reachability,
+    WorkloadState,
+    reachability_of,
+)
 
 
 class InstanceResponse(BaseModel):
@@ -13,7 +19,9 @@ class InstanceResponse(BaseModel):
     project_id: UUID
     project_name: str
     hostname: str
-    status: InstanceStatus
+    workload_state: WorkloadState
+    reachability: Reachability
+    last_heartbeat_at: datetime | None
 
 
 class RegisterInstanceRequest(BaseModel):
@@ -22,6 +30,24 @@ class RegisterInstanceRequest(BaseModel):
 
 
 router = APIRouter()
+
+
+def _to_response(instance: Instance, request: Request) -> InstanceResponse:
+    stale_after = request.app.state.heartbeat_stale_after
+    reachability = reachability_of(
+        instance.last_heartbeat_at,
+        now=datetime.now(timezone.utc),
+        stale_after=stale_after,
+    )
+    return InstanceResponse(
+        id=instance.id,
+        project_id=instance.project_id,
+        project_name=instance.project_name,
+        hostname=instance.hostname,
+        workload_state=instance.workload_state,
+        reachability=reachability,
+        last_heartbeat_at=instance.last_heartbeat_at,
+    )
 
 
 @router.post(
@@ -36,13 +62,7 @@ async def register_instance(
     instance = await service.register(
         project_name=payload.project_name, hostname=payload.hostname
     )
-    return InstanceResponse(
-        id=instance.id,
-        project_id=instance.project_id,
-        project_name=instance.project_name,
-        hostname=instance.hostname,
-        status=instance.status,
-    )
+    return _to_response(instance, request)
 
 
 @router.get("/api/instances/{instance_id}", response_model=InstanceResponse)
@@ -53,10 +73,4 @@ async def get_instance(
     instance = await repo.get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="instance not found")
-    return InstanceResponse(
-        id=instance.id,
-        project_id=instance.project_id,
-        project_name=instance.project_name,
-        hostname=instance.hostname,
-        status=instance.status,
-    )
+    return _to_response(instance, request)
