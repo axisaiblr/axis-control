@@ -96,6 +96,22 @@ synonyms; if a new concept appears, add it here.
   (`status.<id>`, `heartbeat.<id>`, `commands.<id>`); the control
   plane and agent both verify it in constant time and silently drop
   mismatches.
+- **Broker URL** — the externally-reachable NATS endpoint workers
+  connect to. Production value is `wss://nats.${ADMIN_DOMAIN}`,
+  TLS-terminated and basicauth-gated by Caddy, which reverse-proxies
+  the WebSocket upgrade onto the internal `nats://nats:4222`. Inside
+  the management-VPS docker network services keep using the internal
+  URL; only agents on remote workers go through the broker URL.
+- **Worker basicauth** — shared HTTP basicauth pair
+  (`WORKER_BASICAUTH_USER` / `WORKER_BASICAUTH_HASH` on the management
+  VPS, the matching plaintext password on each worker) gating the
+  broker URL and the vmsingle remote-write endpoint
+  (`vm.${ADMIN_DOMAIN}/api/v1/write`). One pair across the whole
+  fleet; deliberately distinct from the admin-API basicauth
+  (`BASICAUTH_*`) introduced for operators in #19. Threat model:
+  rotation is fleet-wide. Impersonation is still blocked by the
+  per-instance [[agent token]]; the broker is anonymous on the
+  internal network.
 
 ## NATS subject taxonomy
 
@@ -216,9 +232,16 @@ via two opaque tokens (#8):
   or flip reachability. The control plane's command publisher stamps
   the same token; the agent compares it on receipt and silently drops
   mismatches — a third party reachable to the broker cannot
-  impersonate the control plane. NATS *connection-level* auth (user/
-  pass on the broker, or per-instance NATS users) is a separate
-  follow-up; until it lands keep the broker on a private network.
+  impersonate the control plane.
+- Broker network exposure (#26): the NATS broker is reverse-proxied
+  by Caddy at `wss://nats.${ADMIN_DOMAIN}` with HTTP basicauth in
+  front of the WebSocket upgrade, using the shared
+  [[Worker basicauth]] pair. The internal broker keeps anonymous
+  auth on the docker network. Same model exposes vmsingle's
+  remote-write endpoint at `vm.${ADMIN_DOMAIN}/api/v1/write`. Rationale
+  and rejected alternatives recorded in
+  [ADR-0001](docs/adr/0001-nats-broker-exposure.md); per-instance
+  basicauth migration tracked in #27.
 
 **Management-plane deployment.** `docker-compose.yml` at the repo root
 brings up the seven-service management plane on the VPS:
@@ -294,21 +317,25 @@ restore-roundtrip integration test is a follow-up.
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
-No `ready-for-agent` items currently open — the next batch will appear
-after the next round of real usage.
+Currently in `ready-for-agent`: **#26 — expose NATS broker + vmsingle
+remote-write to remote workers** (design recorded in
+[ADR-0001](docs/adr/0001-nats-broker-exposure.md), agent brief in the
+issue comments). Blocks the first real worker deploy.
 
 ## What's not yet planned in detail (roadmap)
 
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **NATS connection-level auth** — message-level auth landed in #8, but
-  the broker itself still accepts anonymous connections. Layering
-  user/pass (or per-instance NATS users) on top is a separate change.
-- **Admin UI** — HTMX pages over the existing API.
+- **Admin UI** — HTMX pages over the existing API (#9).
 - **Custom per-project metrics** — vmagent on each worker scrapes
   project metrics, ships to vmsingle on the management VPS; Grafana
-  dashboards.
+  dashboards (#10). Network exposure + auth on the remote-write path
+  split out to #26.
+- **Grafana dashboard / datasource provisioning** (#20).
+- **Per-instance NATS broker credential** — migrate from the shared
+  `WORKER_BASICAUTH_*` to a per-agent pair pushed into Caddy admin
+  API at registration (#27). Builds on #26.
 
 ## Conventions
 
