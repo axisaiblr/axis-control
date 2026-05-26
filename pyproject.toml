@@ -17,6 +17,9 @@ asyncio_mode = "auto"
 testpaths = ["packages"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers --import-mode=importlib"
+markers = [
+    "docker_image: builds a real OCI image via `docker build`. Slow (~30-60s on first run, cached after). Requires Docker daemon. Deselect with `-m 'not docker_image'` during fast iteration.",
+]
 
 [dependency-groups]
 dev = [

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Dockerfiles for `axis-control` and `axis-agent`, published to GHCR
+  as `ghcr.io/axisaiblr/axis-control` and `ghcr.io/axisaiblr/axis-agent`.
+  Multi-stage build: `ghcr.io/astral-sh/uv` builder syncs the workspace
+  into a self-contained venv, copied into a `python:3.12-slim-bookworm`
+  runtime. Console scripts (`axis-control`, `axis-agent`) are the
+  image ENTRYPOINTs. The agent image additionally carries
+  `docker-ce-cli` + `docker-compose-plugin` so it can shell out to
+  `docker compose` against the worker host's mounted
+  `/var/run/docker.sock`.
+- `.github/workflows/docker-publish.yml`: builds + pushes both images.
+  On push to `main` images are tagged `:edge`. On a `v*.*.*` tag they
+  are tagged `:MAJOR.MINOR.PATCH`, `:MAJOR.MINOR`, and `:latest`. Uses
+  `docker/build-push-action` + GHA build cache scoped per image.
+  linux/amd64 only for v1.
+- New pytest marker `docker_image` for the slow build-and-run tests
+  under `packages/{control,agent}/tests/test_docker_image.py`. Skip
+  during fast loops with `-m 'not docker_image'`.
 - Instance reachability driven by agent heartbeats. The agent now
   publishes a `HeartbeatMessage` on `heartbeat.<instance_id>` once
   immediately after starting its command subscription and then every

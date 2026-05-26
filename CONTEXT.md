@@ -152,6 +152,22 @@ Control deep modules added for the reachability split:
 bumps `last_heartbeat_at` on receipt), `domain.models.reachability_of`
 (pure function over `last_heartbeat_at + now + stale_after`).
 
+**Distribution.** Both packages ship as OCI images on GHCR
+(`ghcr.io/axisaiblr/axis-control`, `ghcr.io/axisaiblr/axis-agent`)
+built from `packages/{control,agent}/Dockerfile`. Multi-stage: `uv`
+builder produces a self-contained venv that's copied into a
+`python:3.12-slim-bookworm` runtime; the console scripts are the
+ENTRYPOINTs. The agent image additionally carries `docker-ce-cli` +
+`docker-compose-plugin` so it can shell out to `docker compose`
+against the worker host's bind-mounted `/var/run/docker.sock`.
+`.github/workflows/docker-publish.yml` builds + pushes on push to
+`main` (tagged `:edge`) and on `v*.*.*` tags (`:MAJOR.MINOR.PATCH`,
+`:MAJOR.MINOR`, `:latest`). linux/amd64 only for v1; tests in
+`packages/{control,agent}/tests/test_docker_image.py` (marker:
+`docker_image`) verify the entrypoint, ENTRYPOINT directive, and —
+for the agent — the docker CLI + compose plugin against a real
+build.
+
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
@@ -163,7 +179,6 @@ after the next round of real usage.
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **Dockerfile for control + agent → GHCR pipeline.**
 - **Production `docker-compose.yml` for the management VPS** (caddy,
   postgres, nats, axis-control, grafana, vmsingle).
 - **`docker-compose.worker.yml` template** (worker app + axis-agent
