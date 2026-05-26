@@ -152,3 +152,151 @@ def test_healthz_is_not_basicauth_gated() -> None:
         "without it basicauth on /api/* either leaks (covers /healthz "
         "too) or is missing (leaves /api/* open). Be explicit."
     )
+
+
+def _extract_site_block(text: str, site_addr_token: str) -> str:
+    """Best-effort extraction of the body of a Caddy site-block whose
+    site address contains `site_addr_token`. Returns the substring
+    between the first `{` after the site address and its matching `}`.
+    """
+    start = text.find(site_addr_token)
+    assert start != -1, f"site address token {site_addr_token!r} not found"
+    # The token itself contains a `{` (Caddy's env-var syntax), so we
+    # must advance past it before looking for the site-block's opening
+    # brace; otherwise we end up scanning the body of the env-var
+    # reference and finding nothing.
+    brace_open = text.find("{", start + len(site_addr_token))
+    assert brace_open != -1, (
+        f"no `{{` after site address {site_addr_token!r} — Caddyfile "
+        "structure is unexpected"
+    )
+    depth = 1
+    i = brace_open + 1
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, (
+        f"unbalanced braces after site address {site_addr_token!r}"
+    )
+    return text[brace_open + 1 : i - 1]
+
+
+def test_nats_subdomain_reverse_proxies_with_worker_basicauth() -> None:
+    """Slice 1 (#26): NATS WSS exposure site-block. The block must:
+    - take its site address from `{$NATS_DOMAIN}` so an operator can
+      override the default `nats.${ADMIN_DOMAIN}` (compose default);
+    - gate the upgrade with `basicauth` against `{$WORKER_BASICAUTH_*}`
+      — distinct from the operator `BASICAUTH_*` so the two audiences
+      can rotate independently;
+    - reverse_proxy onto the internal `nats:8443` WebSocket listener
+      (config'd in `nats/nats.conf`)."""
+    text = _caddyfile_text()
+    assert "{$NATS_DOMAIN}" in text, (
+        "Caddyfile is missing a `{$NATS_DOMAIN}` site-block — workers "
+        "have no path to the NATS broker (#26)"
+    )
+    block = _extract_site_block(text, "{$NATS_DOMAIN}")
+    assert "basicauth" in block, (
+        "{$NATS_DOMAIN} site-block has no basicauth directive — the "
+        "NATS WSS gateway would be reachable anonymously"
+    )
+    assert "{$WORKER_BASICAUTH_USER}" in block, (
+        "NATS site-block basicauth must read username from "
+        "{$WORKER_BASICAUTH_USER} (distinct from operator BASICAUTH_*)"
+    )
+    assert "{$WORKER_BASICAUTH_HASH}" in block, (
+        "NATS site-block basicauth must read hash from "
+        "{$WORKER_BASICAUTH_HASH}"
+    )
+    assert "reverse_proxy nats:8443" in block, (
+        "NATS site-block must reverse_proxy to `nats:8443` — the "
+        "WebSocket listener configured in nats/nats.conf. Without this "
+        "pin the upgrade silently routes nowhere."
+    )
+
+
+def test_vmsingle_subdomain_exposes_write_endpoints_only() -> None:
+    """Slice 2 (#26): vmsingle remote-write exposure site-block.
+    Symmetric to the NATS site-block (same basicauth pair), but with
+    one critical extra: the routes are write-only. /api/v1/query,
+    /internal/*, /debug/* must NOT pass through caddy — they are for
+    grafana on the internal network only."""
+    text = _caddyfile_text()
+    assert "{$VM_DOMAIN}" in text, (
+        "Caddyfile is missing a `{$VM_DOMAIN}` site-block — workers "
+        "have no path to push metrics (#26)"
+    )
+    block = _extract_site_block(text, "{$VM_DOMAIN}")
+    assert "basicauth" in block, (
+        "{$VM_DOMAIN} site-block must require basicauth"
+    )
+    assert "{$WORKER_BASICAUTH_USER}" in block, (
+        "vmsingle site-block basicauth must read username from "
+        "{$WORKER_BASICAUTH_USER}"
+    )
+    assert "{$WORKER_BASICAUTH_HASH}" in block, (
+        "vmsingle site-block basicauth must read hash from "
+        "{$WORKER_BASICAUTH_HASH}"
+    )
+    assert "reverse_proxy vmsingle:8428" in block, (
+        "vmsingle site-block must reverse_proxy to `vmsingle:8428`"
+    )
+    # Write-only contract — at least one canonical Prometheus /
+    # VictoriaMetrics write path must appear in a path matcher.
+    write_path_present = any(
+        write_path in block
+        for write_path in (
+            "/api/v1/write",
+            "/api/v1/import",
+            "/api/v2/write",
+        )
+    )
+    assert write_path_present, (
+        "vmsingle site-block must scope its reverse_proxy to write "
+        "paths (/api/v1/write, /api/v1/import, /api/v2/write). "
+        "Exposing /api/v1/query would leak fleet observability."
+    )
+    # And the query endpoint must NOT be enumerated as a passthrough.
+    assert "/api/v1/query" not in block, (
+        "vmsingle site-block must NOT route /api/v1/query — query "
+        "endpoints stay on the internal network for grafana. A "
+        "worker basicauth leak would otherwise become a fleet-wide "
+        "observability leak."
+    )
+
+
+def test_env_example_documents_worker_basicauth_and_subdomains() -> None:
+    """Slice 9 (#26): the new operator vars must be in .env.example.
+    Without this an operator who copies the file to `.env` will leave
+    `WORKER_BASICAUTH_*` blank and caddy's basicauth on the NATS / VM
+    sites fails closed — every worker connection 401s on first start.
+
+    Also asserts the DNS preflight checklist: an operator needs to
+    add A-records for `nats.${ADMIN_DOMAIN}` and `vm.${ADMIN_DOMAIN}`
+    alongside `grafana.${ADMIN_DOMAIN}`."""
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    for var in ("WORKER_BASICAUTH_USER=", "WORKER_BASICAUTH_HASH="):
+        assert var in text, (
+            f"{var.rstrip('=')!r} is missing from .env.example (#26). "
+            f"Without it an operator copying .env.example to .env will "
+            f"leave the NATS/VM caddy gates broken on first start."
+        )
+    # The `caddy hash-password` recipe is already mentioned for the
+    # operator BASICAUTH_HASH; reuse the same wording for the worker
+    # hash so an operator doesn't have to relearn the trick.
+    # We assert the recipe is present somewhere in the file (covers
+    # both BASICAUTH_HASH and WORKER_BASICAUTH_HASH together).
+    assert "caddy hash-password" in text, (
+        ".env.example must mention `caddy hash-password` so the operator "
+        "knows how to generate WORKER_BASICAUTH_HASH"
+    )
+    # DNS preflight: explicit mention that workers go through
+    # nats.${ADMIN_DOMAIN} and vm.${ADMIN_DOMAIN}.
+    assert "nats." in text and "vm." in text, (
+        ".env.example must document that DNS A-records for "
+        "`nats.${ADMIN_DOMAIN}` and `vm.${ADMIN_DOMAIN}` are required "
+        "alongside grafana — workers have no other path in"
+    )

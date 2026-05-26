@@ -264,6 +264,105 @@ def test_caddy_env_threads_basicauth_and_allow_cidrs(monkeypatch) -> None:
     )
 
 
+def test_caddy_env_threads_worker_basicauth_and_subdomains(monkeypatch) -> None:
+    """Slice 3 (#26): the NATS + vmsingle Caddyfile site-blocks read
+    four additional env vars that must be threaded through from the
+    host `.env` into the caddy container:
+
+      * WORKER_BASICAUTH_USER / _HASH — shared credential for the WSS
+        NATS gateway and the vmsingle remote-write endpoint.
+      * NATS_DOMAIN / VM_DOMAIN — externally-exposed subdomain site
+        addresses. Compose must default each to
+        `<sub>.${ADMIN_DOMAIN}` so an operator who only sets
+        ADMIN_DOMAIN still gets a working stack.
+
+    Without that wiring, the two new site-blocks load with empty
+    site addresses (caddy will refuse to start) or empty basicauth
+    pairs (the gateway accepts no one or everyone, depending on
+    caddy version). Either way the worker-side flow is broken on
+    first start.
+    """
+    monkeypatch.setenv("WORKER_BASICAUTH_USER", "worker")
+    monkeypatch.setenv("WORKER_BASICAUTH_HASH", "WORKER-HASH-PLACEHOLDER")
+    monkeypatch.setenv("ADMIN_DOMAIN", "admin.example.com")
+    # NATS_DOMAIN / VM_DOMAIN deliberately NOT pre-set — we want to
+    # observe the compose defaults.
+    monkeypatch.delenv("NATS_DOMAIN", raising=False)
+    monkeypatch.delenv("VM_DOMAIN", raising=False)
+    config = _compose_config()
+    caddy = _service(config, "caddy")
+    env = _service_env(caddy)
+
+    assert env.get("WORKER_BASICAUTH_USER") == "worker", (
+        "caddy is not receiving WORKER_BASICAUTH_USER from the host "
+        ".env — the NATS / VM site-blocks will load with an empty "
+        "basicauth username (#26)"
+    )
+    assert env.get("WORKER_BASICAUTH_HASH") == "WORKER-HASH-PLACEHOLDER", (
+        "caddy is not receiving WORKER_BASICAUTH_HASH from the host "
+        ".env — basicauth will be gateable by anyone (or no one)"
+    )
+    assert env.get("NATS_DOMAIN") == "nats.admin.example.com", (
+        "NATS_DOMAIN must default to `nats.${ADMIN_DOMAIN}` when not "
+        "explicitly set — got "
+        f"{env.get('NATS_DOMAIN')!r}. An operator who only sets "
+        "ADMIN_DOMAIN should still get a working NATS gateway."
+    )
+    assert env.get("VM_DOMAIN") == "vm.admin.example.com", (
+        "VM_DOMAIN must default to `vm.${ADMIN_DOMAIN}` when not "
+        "explicitly set — got "
+        f"{env.get('VM_DOMAIN')!r}. Same defaulting story as "
+        "NATS_DOMAIN."
+    )
+
+
+def test_nats_service_mounts_nats_conf_and_runs_with_config_flag() -> None:
+    """Slice 3 (#26): the nats service must mount `nats/nats.conf`
+    into the container and invoke nats-server with `--config` so the
+    file is actually read at startup. Without the mount the config
+    file is absent inside the container; without `--config` the
+    binary starts with empty defaults and ignores the file. Either
+    way the WebSocket listener on :8443 fails to come up, and the
+    caddy reverse-proxy from {$NATS_DOMAIN} has no upstream to hit.
+    """
+    config = _compose_config()
+    nats = _service(config, "nats")
+
+    # Volume bind for nats.conf
+    volumes = nats.get("volumes", [])
+    bind_targets = []
+    for vol in volumes:
+        if isinstance(vol, dict):
+            bind_targets.append((vol.get("source", ""), vol.get("target", "")))
+        elif isinstance(vol, str):
+            parts = vol.split(":")
+            if len(parts) >= 2:
+                bind_targets.append((parts[0], parts[1]))
+    nats_conf_mount = any(
+        "nats.conf" in src and target.endswith("nats.conf")
+        for src, target in bind_targets
+    )
+    assert nats_conf_mount, (
+        "nats service must bind-mount `nats/nats.conf` into the "
+        "container — without it the websocket listener has no config "
+        "and caddy's reverse_proxy to nats:8443 hits a refused "
+        "connection (#26). Got volumes: "
+        f"{volumes!r}"
+    )
+
+    # `--config /etc/nats/nats.conf` (or equivalent) on the command
+    command = nats.get("command", [])
+    if isinstance(command, str):
+        joined = command
+    else:
+        joined = " ".join(command)
+    assert "--config" in joined, (
+        "nats service must start with `--config <path>` — without it "
+        "the nats-server ignores the mounted nats.conf entirely. "
+        f"Got command: {command!r}"
+    )
+
+
 def test_caddy_publishes_80_443_with_persistent_acme_state() -> None:
     """Caddy is the only inbound port on the VPS. It publishes :80
     (HTTP + Let's Encrypt challenges) and :443 (HTTPS). The Caddyfile
