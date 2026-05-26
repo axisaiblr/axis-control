@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Backup story for the management-VPS named volumes (#18). New
+  `backup` sidecar in `docker-compose.yml` runs daily `pg_dump` over
+  the docker network and tars a VictoriaMetrics snapshot taken via the
+  vmsingle HTTP API, then uploads both artifacts to an S3-compatible
+  bucket (Timeweb Cloud S3 in production; any S3 endpoint works via
+  `AXIS_BACKUP_S3_ENDPOINT`). A new `axis_backup_data` named volume
+  keeps a rolling local buffer trimmed to
+  `AXIS_BACKUP_LOCAL_RETENTION_DAYS` (default 7) so a fat-fingered
+  `docker compose down -v` is recoverable without a download. Schedule
+  configurable via `AXIS_BACKUP_CRON` (default `0 2 * * *`). Image
+  source at `packages/backup/{Dockerfile,backup.sh}`, published to
+  GHCR as `ghcr.io/axisaiblr/axis-backup` from the same
+  `docker-publish.yml` matrix as the other two images. No app-level
+  encryption — bucket at-rest is trusted (documented in `.env.example`
+  with a follow-up note if the threat model changes). Restore is a
+  manual flow with the recipe in `.env.example`. Covered by
+  `tests/test_production_compose.py` (image / restart / depends_on /
+  vmsingle read-mount / local volume / S3+postgres env wiring /
+  defaults) and `tests/test_backup_image.py` (Dockerfile + entrypoint
+  + env-contract drift check).
 - Authentication between agent, control plane, and NATS (#8). Two
   layers of identity, both opaque random tokens:
   * **Bootstrap registration token** — shared secret configured on the

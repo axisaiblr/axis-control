@@ -1,6 +1,6 @@
 name: Build & publish images
 
-# Publishes both axis-control and axis-agent OCI images to GHCR.
+# Publishes axis-control, axis-agent, and axis-backup OCI images to GHCR.
 #
 # Triggers:
 #   - push to main           → image tag :edge   (rolling "tip of main")
@@ -35,6 +35,9 @@ jobs:
           - package: agent
             dockerfile: packages/agent/Dockerfile
             image: axis-agent
+          - package: backup
+            dockerfile: packages/backup/Dockerfile
+            image: axis-backup
     steps:
       - uses: actions/checkout@v4
 
