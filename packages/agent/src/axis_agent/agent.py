@@ -44,6 +44,11 @@ class Agent:
             CommandMessage.subject_for(self._instance_id),
             cb=self._on_command,
         )
+        # Wait until the SUB protocol frame is acknowledged by the broker
+        # before returning. Without this, a command published immediately
+        # after `start()` returns (from any connection) can race the SUB
+        # to the server and be dropped — NATS core has no in-flight queue.
+        await self._nats.flush()
 
     async def stop(self) -> None:
         if self._subscription is not None:

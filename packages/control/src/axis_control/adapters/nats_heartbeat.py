@@ -39,6 +39,10 @@ class HeartbeatSubscriber:
             HeartbeatMessage.subject_wildcard(),
             cb=self._on_message,
         )
+        # Block until the broker has acknowledged the SUB so a heartbeat
+        # published the instant start() returns is delivered rather than
+        # dropped to no-listeners.
+        await self._client.flush()
 
     async def stop(self) -> None:
         if self._subscription is not None:

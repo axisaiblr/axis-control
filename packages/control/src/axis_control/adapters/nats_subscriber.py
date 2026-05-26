@@ -29,6 +29,10 @@ class StatusSubscriber:
             StatusMessage.subject_wildcard(),
             cb=self._on_message,
         )
+        # Block until the broker has acknowledged the SUB so a status
+        # message published the instant start() returns is delivered
+        # rather than dropped to no-listeners.
+        await self._client.flush()
 
     async def stop(self) -> None:
         if self._subscription is not None:

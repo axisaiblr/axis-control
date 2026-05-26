@@ -117,3 +117,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - README quickstart no longer asks the operator to copy a UUID by hand
   from `curl POST /api/instances` into `.env`. `uv run axis-agent`
   works directly after editing `project_name` + control plane URL.
+
+### Fixed
+- NATS subscribe-then-publish race: `Agent.start()`,
+  `StatusSubscriber.start()`, and `HeartbeatSubscriber.start()` now
+  `flush()` after `subscribe()`, so they block until the broker has
+  acknowledged the SUB. Without this, a message published the instant
+  `start()` returned could reach the broker before the subscription
+  was registered and be dropped to no-listeners. Surfaced as
+  intermittent failures of
+  `test_agent_executes_disable_and_reports_completed_status` on
+  Windows (NATS-on-Docker-Desktop latency widened the race window),
+  but the bug existed in production too — most relevant for the agent,
+  since an operator could issue a command immediately after a fresh
+  agent registers.
+- `agent_nc` test fixture now closes with `nc.close()` instead of
+  `nc.drain()`. `drain()` did UNSUB-then-close while the read loop was
+  still running, which races nats-py's PONG handler and surfaced as
+  `asyncio.InvalidStateError: invalid state` at teardown.
