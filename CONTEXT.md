@@ -120,8 +120,9 @@ schema is applied on startup. Graceful SIGINT/SIGTERM shutdown.
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
 
-**PRD #4** — bundles the three bug-class issues below into one
-narrative. The actual work units are #1, #2, #3.
+Three `ready-for-agent` bugs from the first round of real usage. Each
+carries its own agent brief; any of them can be picked up independently.
+Recommended landing order: #1 → #3 → #2.
 
 - **#1** *(enhancement)* — agent self-registers on startup; removes
   the manual UUID-copy step. Highest-leverage UX fix.
@@ -129,8 +130,6 @@ narrative. The actual work units are #1, #2, #3.
   forever; needs timeout + delivery hint.
 - **#3** *(enhancement)* — split instance status into reachability
   (heartbeat-driven) and workload state (operator intent).
-
-Recommended order: #1 → #3 → #2.
 
 ## What's not yet planned in detail (roadmap)
 
