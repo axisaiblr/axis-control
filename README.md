@@ -40,33 +40,31 @@ copy .env.example .env
 uv run axis-control
 ```
 
-In a second terminal, register an instance and capture its id:
-
-```powershell
-$resp = curl -s -X POST http://127.0.0.1:8000/api/instances `
-  -H "content-type: application/json" `
-  --data '{"project_name":"text-assistant","hostname":"dev-laptop"}'
-$resp
-# {"id":"<UUID>","project_id":"...","project_name":"text-assistant",
-#  "hostname":"dev-laptop","status":"unknown"}
-```
-
-Copy the `id` into `.env` as `AXIS_AGENT_INSTANCE_ID`, then in a third terminal:
+In a second terminal, start the agent — it registers itself with the
+control plane on first start and remembers the assigned id afterwards.
+No copy-paste required.
 
 ```powershell
 uv run axis-agent
-# axis-agent starting instance=<UUID> mode=logging
+# axis-agent starting project=text-assistant hostname=dev-laptop mode=logging
+# no persisted identity at ...\axis-agent\instance.json; registering with control plane
+# registered instance_id=<UUID>; persisted to ...\axis-agent\instance.json
 # connected to NATS at nats://127.0.0.1:4222
 # subscribed; waiting for commands on commands.<UUID>
 ```
 
-Trigger a disable:
+Grab the assigned id from the agent log (or `GET /api/instances`), then
+trigger a disable:
 
 ```powershell
 curl -X POST http://127.0.0.1:8000/api/instances/<UUID>/commands `
   -H "content-type: application/json" `
   --data '{"type":"disable"}'
 ```
+
+To force a clean re-registration (deliberately get a new UUID), run
+`uv run axis-agent --reset-identity` — it deletes the cached
+`instance.json` before connecting.
 
 You'll see the agent log a `[dry-run] would: docker compose stop`, then the
 control plane status subscriber finalises the command. Verify:

@@ -100,8 +100,8 @@ adapters/services leak FastAPI types or asyncpg types into `domain`.
 
 ## What's built (v0.1)
 
-End-to-end disable / enable loop, covered by 4 integration tests (~8 s
-on Windows + Docker Desktop):
+End-to-end disable / enable loop, plus agent self-registration. Covered
+by integration tests against real Postgres + NATS via testcontainers:
 
 - `POST /api/instances` — register a worker (auto-creates project).
 - `POST /api/instances/{id}/commands` — issue `disable` / `enable`,
@@ -111,21 +111,27 @@ on Windows + Docker Desktop):
   real), publishes `StatusMessage` on `status.<id>`.
 - Control plane's `StatusSubscriber` finalises the command row and
   flips instance `status`.
+- Agent **self-registers** on first start: reads `project_name` +
+  `hostname` + `control_plane_url`, calls the registration endpoint,
+  persists the assigned UUID to `state_dir/instance.json`, reuses it
+  across restarts. `AXIS_AGENT_INSTANCE_ID` remains as an override.
 
 Console scripts: `axis-control`, `axis-agent`. Both load config from
 env (`AXIS_CONTROL_*`, `AXIS_AGENT_*`) and a `.env` file. Idempotent
 schema is applied on startup. Graceful SIGINT/SIGTERM shutdown.
 
+Agent deep modules: `identity.AgentIdentityStore` (file-backed JSON),
+`control_plane.ControlPlaneClient` (thin httpx wrapper),
+`registration.ensure_identity` (override → load → register-with-backoff).
+
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
 
-Three `ready-for-agent` bugs from the first round of real usage. Each
-carries its own agent brief; any of them can be picked up independently.
-Recommended landing order: #1 → #3 → #2.
+Two remaining `ready-for-agent` items from the first round of real
+usage. Each carries its own agent brief; any of them can be picked up
+independently. Recommended landing order: #3 → #2.
 
-- **#1** *(enhancement)* — agent self-registers on startup; removes
-  the manual UUID-copy step. Highest-leverage UX fix.
 - **#2** *(bug)* — commands published with no subscriber stay pending
   forever; needs timeout + delivery hint.
 - **#3** *(enhancement)* — split instance status into reachability
