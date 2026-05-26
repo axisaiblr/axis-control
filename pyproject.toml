@@ -14,11 +14,13 @@ axis-agent = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages"]
+testpaths = ["packages", "tests"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers --import-mode=importlib"
 markers = [
     "docker_image: builds a real OCI image via `docker build`. Slow (~30-60s on first run, cached after). Requires Docker daemon. Deselect with `-m 'not docker_image'` during fast iteration.",
+    "production_compose: parses and asserts over the production docker-compose.yml via `docker compose config`. Requires the Docker CLI but does not pull images or run containers.",
+    "production_compose_integration: brings the full production stack up via `docker compose up`, exercises it, tears down. Slow; requires a working Docker daemon. Deselect with `-m 'not production_compose_integration'`.",
 ]
 
 [dependency-groups]
@@ -28,4 +30,5 @@ dev = [
     "testcontainers[postgres]>=4.8",
     "httpx>=0.27",
     "anyio>=4.6",
+    "pyyaml>=6.0",
 ]

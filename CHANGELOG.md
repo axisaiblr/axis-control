@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Production `docker-compose.yml` for the management VPS, plus a minimal
+  `caddy/Caddyfile`. One file, one host, one command:
+  `cp .env.example .env && docker compose up -d` brings up caddy (TLS
+  via Let's Encrypt for `${ADMIN_DOMAIN}`), postgres (named volume),
+  nats (internal-only, no host port until auth lands in #8),
+  axis-control (image from GHCR, wired by service-DNS to postgres + nats,
+  fronted by caddy), vmsingle (VictoriaMetrics, named volume,
+  configurable retention), and grafana (admin pw from env, named volume).
+  Caddy reverse-proxies the admin domain to axis-control:8000; grafana
+  routing and Let's-Encrypt-staging defaults are follow-ups.
+- `.env.example` extended with a production-stack section
+  (`POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, `AXIS_CONTROL_IMAGE_TAG`,
+  `ADMIN_DOMAIN`) alongside the existing local-dev section. Documents the
+  `http://`-scheme opt-out for non-ACME-issuable hostnames.
+- Two new pytest markers for the production compose:
+  - `production_compose` — static checks via `docker compose config`,
+    fast, runs on every test invocation.
+  - `production_compose_integration` — brings the full stack up, exercises
+    caddy → axis-control `/healthz`, and verifies postgres data survives a
+    `docker compose down && up`. Slow; deselect with
+    `-m 'not production_compose_integration'`.
+  Tests live at `tests/test_production_compose.py` (new top-level
+  `tests/` directory, added to `pytest.testpaths`).
+- `pyyaml` as a dev dependency (compose-config parsing in the new tests).
 - Dockerfiles for `axis-control` and `axis-agent`, published to GHCR
   as `ghcr.io/axisaiblr/axis-control` and `ghcr.io/axisaiblr/axis-agent`.
   Multi-stage build: `ghcr.io/astral-sh/uv` builder syncs the workspace

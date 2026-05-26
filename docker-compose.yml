@@ -1,0 +1,109 @@
+# Production management-plane stack for the axis-control VPS.
+#
+# One file, one host, one command:
+#
+#   cp .env.example .env   # edit the secrets
+#   docker compose pull
+#   docker compose up -d
+#
+# Services that ship in v0.1:
+#   caddy        — TLS-terminating reverse proxy in front of axis-control
+#   postgres     — control-plane database (named volume, restart=unless-stopped)
+#   nats         — broker for commands / status / heartbeats
+#   axis-control — FastAPI control plane, image from GHCR
+#   vmsingle     — VictoriaMetrics single-node for fleet metrics
+#   grafana      — dashboards over vmsingle
+#
+# The local-dev compose lives at docker-compose.dev.yml and is irrelevant
+# in production.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-axis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-axis}
+    volumes:
+      - axis_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-axis} -d ${POSTGRES_DB:-axis}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    # No `ports:` — the broker is unauthenticated in v0.1, so it is
+    # reachable only to the other services on this docker network.
+    # When auth lands (#8) we can expose 4222 to remote agents.
+
+  axis-control:
+    image: ghcr.io/axisaiblr/axis-control:${AXIS_CONTROL_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      # Service-DNS targets — these resolve inside the docker network and
+      # are independent of the host-side .env (the dev `.env` uses 127.0.0.1
+      # which would not work from inside a container).
+      AXIS_CONTROL_DATABASE_URL: postgresql://${POSTGRES_USER:-axis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-axis}
+      AXIS_CONTROL_NATS_URL: nats://nats:4222
+      AXIS_CONTROL_HTTP_HOST: "0.0.0.0"
+      AXIS_CONTROL_HTTP_PORT: "8000"
+      AXIS_CONTROL_LOG_LEVEL: ${AXIS_CONTROL_LOG_LEVEL:-INFO}
+    # No `ports:` — caddy is the only entry point to the admin API.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - axis_caddy_data:/data
+      - axis_caddy_config:/config
+    environment:
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-localhost}
+    depends_on:
+      - axis-control
+
+  vmsingle:
+    image: victoriametrics/victoria-metrics:v1.106.1
+    restart: unless-stopped
+    # Retain a year of metrics by default. Tune on the VPS via .env.
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod=${VMSINGLE_RETENTION_PERIOD:-12}"
+    volumes:
+      - axis_vmsingle_data:/victoria-metrics-data
+    # No `ports:` — grafana queries vmsingle on the internal network.
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    depends_on:
+      - vmsingle
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Disable anonymous access — the admin domain is reachable from
+      # the public internet via caddy.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - axis_grafana_data:/var/lib/grafana
+    # No host port — operator reaches Grafana via caddy (follow-up: add
+    # a `grafana.{$ADMIN_DOMAIN}` block to the Caddyfile).
+
+volumes:
+  axis_postgres_data:
+  axis_caddy_data:
+  axis_caddy_config:
+  axis_vmsingle_data:
+  axis_grafana_data:
