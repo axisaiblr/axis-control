@@ -1,0 +1,28 @@
+[project]
+name = "axis-control-workspace"
+version = "0.1.0"
+description = "AXIS AI control plane: admin panel, command dispatch, metrics."
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["packages/shared", "packages/control", "packages/agent"]
+
+[tool.uv.sources]
+axis-shared = { workspace = true }
+axis-control = { workspace = true }
+axis-agent = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "testcontainers[postgres]>=4.8",
+    "httpx>=0.27",
+    "anyio>=4.6",
+]

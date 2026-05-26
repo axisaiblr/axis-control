@@ -1,0 +1,34 @@
+# Local development infrastructure only.
+#
+# Spins up the two services axis-control + axis-agent depend on. Run the
+# Python processes from your host (`uv run axis-control`, `uv run axis-agent`)
+# during development; in production these run inside their own containers and
+# this file is irrelevant.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: axis
+      POSTGRES_PASSWORD: axis
+      POSTGRES_DB: axis
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - axis_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axis -d axis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4222:4222"  # client
+      - "127.0.0.1:8222:8222"  # monitor (http)
+
+volumes:
+  axis_postgres_data:
