@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-26
+
+First release with a real deploy story: an operator can stand up the
+management VPS from `docker-compose.yml`, register worker agents over
+HTTPS, and get daily backups out the door. NATS broker network exposure
+is **not** yet shipped — workers running on a remote VPS cannot connect
+until #26 lands.
+
 ### Added
 - Operator-facing Caddyfile (#19). The previously-minimal
   `caddy/Caddyfile` now ships a separate `grafana.${ADMIN_DOMAIN}`
