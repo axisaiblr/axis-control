@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Authentication between agent, control plane, and NATS (#8). Two
+  layers of identity, both opaque random tokens:
+  * **Bootstrap registration token** — shared secret configured on the
+    control plane as `AXIS_CONTROL_REGISTRATION_TOKEN`; agents present
+    it as `Authorization: Bearer <token>` on `POST /api/instances`.
+    Without it the endpoint refuses every request (production-safe
+    default; the value mirrors to each worker as
+    `AXIS_AGENT_REGISTRATION_TOKEN`).
+  * **Per-instance agent token** — minted at registration, returned to
+    the agent exactly once in the 201 response, persisted on the
+    instance row plus in the agent's identity store. Every
+    `status.<id>`, `heartbeat.<id>`, and `commands.<id>` message
+    carries this token in its envelope; the control plane verifies
+    inbound messages and the agent verifies inbound commands in
+    constant time. Mismatching messages are dropped with a log warning
+    — late or spoofed publishes can no longer finalise a command,
+    flip reachability, or impersonate the control plane on an open
+    broker.
+- New control-plane config `AXIS_CONTROL_REGISTRATION_TOKEN` and agent
+  config `AXIS_AGENT_REGISTRATION_TOKEN`; both compose templates
+  (production + worker) thread the value through. `.env.example`
+  documents both with a `secrets.token_urlsafe(32)` recipe.
+- New repo helper `axis_control.domain.auth.mint_agent_token` /
+  `verify_agent_token` (constant-time compare). Dispatching a command
+  to an instance with no persisted token returns HTTP 404 instead of
+  publishing an unstampable message.
 - Worker `docker-compose.worker.yml` template that ships the `axis-agent`
   sidecar as a drop-in next to a project's own compose file on a worker
   VPS. Run both compose files together under one project name; the

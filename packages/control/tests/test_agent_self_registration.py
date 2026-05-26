@@ -25,6 +25,8 @@ from axis_agent.control_plane import ControlPlaneClient
 from axis_agent.identity import AgentIdentityStore
 from axis_agent.registration import RegistrationInputs, ensure_identity
 
+from .conftest import REGISTRATION_TOKEN_FOR_TESTS
+
 
 @dataclass
 class FakeComposeRunner:
@@ -43,11 +45,18 @@ class FakeComposeRunner:
 
 @pytest_asyncio.fixture
 async def agent_http(
-    api_client: httpx.AsyncClient,
+    api_client_unauthed: httpx.AsyncClient,
 ) -> AsyncIterator[ControlPlaneClient]:
-    """A ControlPlaneClient bound to the in-process control-plane app."""
+    """A ControlPlaneClient bound to the in-process control-plane app.
 
-    yield ControlPlaneClient(http=api_client)
+    Uses the unauthed transport so the client itself is solely
+    responsible for stamping the bootstrap token — the way it works in
+    production."""
+
+    yield ControlPlaneClient(
+        http=api_client_unauthed,
+        bootstrap_token=REGISTRATION_TOKEN_FOR_TESTS,
+    )
 
 
 def _inputs(tmp_path: Path) -> tuple[RegistrationInputs, AgentIdentityStore]:
@@ -73,9 +82,10 @@ async def test_self_registered_agent_receives_and_completes_commands(
 ) -> None:
     inputs, store = _inputs(tmp_path)
 
-    instance_id = await ensure_identity(
+    identity = await ensure_identity(
         inputs=inputs, store=store, client=agent_http
     )
+    instance_id = identity.instance_id
 
     # Control plane has a row for the new instance.
     get_resp = await api_client.get(f"/api/instances/{instance_id}")
@@ -84,10 +94,13 @@ async def test_self_registered_agent_receives_and_completes_commands(
     assert body["project_name"] == "text-assistant"
     assert body["hostname"] == "worker-self-reg-01"
 
-    # Identity is on disk so a restart would not re-register.
+    # Identity is on disk so a restart would not re-register, including
+    # the minted agent token.
     persisted = store.load()
     assert persisted is not None
     assert persisted.instance_id == instance_id
+    assert persisted.agent_token == identity.agent_token
+    assert persisted.agent_token != ""
 
     # Start the real agent on the auto-assigned id and drive a command.
     fake_compose = FakeComposeRunner()
@@ -95,6 +108,7 @@ async def test_self_registered_agent_receives_and_completes_commands(
         instance_id=instance_id,
         nats_client=nats_client,
         compose_runner=fake_compose,
+        agent_token=identity.agent_token,
     )
     await agent.start()
     try:
@@ -138,15 +152,19 @@ async def test_restart_with_same_state_dir_reuses_instance_id(
 ) -> None:
     inputs, store = _inputs(tmp_path)
 
-    first = await ensure_identity(
-        inputs=inputs, store=store, client=agent_http
-    )
+    first = (
+        await ensure_identity(
+            inputs=inputs, store=store, client=agent_http
+        )
+    ).instance_id
 
     # Simulate a restart: brand-new store object, same directory.
     second_store = AgentIdentityStore(state_dir=tmp_path)
-    second = await ensure_identity(
-        inputs=inputs, store=second_store, client=agent_http
-    )
+    second = (
+        await ensure_identity(
+            inputs=inputs, store=second_store, client=agent_http
+        )
+    ).instance_id
 
     assert second == first
 
@@ -167,13 +185,17 @@ async def test_reset_identity_causes_re_registration(
 ) -> None:
     inputs, store = _inputs(tmp_path)
 
-    first = await ensure_identity(
-        inputs=inputs, store=store, client=agent_http
-    )
+    first = (
+        await ensure_identity(
+            inputs=inputs, store=store, client=agent_http
+        )
+    ).instance_id
     store.clear()  # operator deletes state file or passes --reset-identity
-    second = await ensure_identity(
-        inputs=inputs, store=store, client=agent_http
-    )
+    second = (
+        await ensure_identity(
+            inputs=inputs, store=store, client=agent_http
+        )
+    ).instance_id
 
     assert second != first
     async with db_pool.acquire() as conn:
@@ -205,7 +227,7 @@ async def test_explicit_instance_id_override_bypasses_registration(
         inputs=overridden, store=store, client=agent_http
     )
 
-    assert resolved == override
+    assert resolved.instance_id == override
     # Nothing persisted; nothing in the DB.
     assert store.load() is None
     async with db_pool.acquire() as conn:

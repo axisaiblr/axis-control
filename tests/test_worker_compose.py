@@ -54,6 +54,7 @@ def _sample_env(tmp_path: Path) -> Path:
                 "AXIS_AGENT_PROJECT_NAME=text-assistant",
                 "AXIS_AGENT_CONTROL_PLANE_URL=https://admin.example.com",
                 "AXIS_AGENT_NATS_URL=nats://admin.example.com:4222",
+                "AXIS_AGENT_REGISTRATION_TOKEN=test-bootstrap-secret",
                 f"AXIS_AGENT_COMPOSE_FILE={REPO_ROOT / 'docker-compose.yml'}",
             ]
         )
@@ -147,6 +148,7 @@ def test_axis_agent_image_tag_is_env_overridable(tmp_path: Path) -> None:
                 "AXIS_AGENT_PROJECT_NAME=text-assistant",
                 "AXIS_AGENT_CONTROL_PLANE_URL=https://admin.example.com",
                 "AXIS_AGENT_NATS_URL=nats://admin.example.com:4222",
+                "AXIS_AGENT_REGISTRATION_TOKEN=test-bootstrap-secret",
                 f"AXIS_AGENT_COMPOSE_FILE={REPO_ROOT / 'docker-compose.yml'}",
                 "AXIS_AGENT_IMAGE_TAG=1.2.3",
             ]
@@ -182,6 +184,9 @@ def test_required_agent_env_is_wired_through(tmp_path: Path) -> None:
     assert env.get("AXIS_AGENT_CONTROL_PLANE_URL") == "https://admin.example.com", env
     assert env.get("AXIS_AGENT_NATS_URL") == "nats://admin.example.com:4222", env
     assert env.get("AXIS_AGENT_COMPOSE_FILE") == str(REPO_ROOT / "docker-compose.yml"), env
+    # Bootstrap secret for self-registration (#8). Mismatch with the
+    # control plane → agent fails to register and exits.
+    assert env.get("AXIS_AGENT_REGISTRATION_TOKEN") == "test-bootstrap-secret", env
 
 
 def test_compose_mode_defaults_to_docker_not_logging(tmp_path: Path) -> None:

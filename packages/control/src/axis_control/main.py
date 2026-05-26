@@ -38,17 +38,27 @@ async def _run(settings: ControlSettings) -> None:
     )
     log.info("connected to NATS at %s", settings.nats_url)
 
+    if not settings.registration_token:
+        log.warning(
+            "AXIS_CONTROL_REGISTRATION_TOKEN is unset; "
+            "POST /api/instances will refuse every request. "
+            "Set it to enable agent self-registration."
+        )
+
     app = create_app(
         db_pool=pool,
         nats_client=nc,
         publish_probe_timeout=settings.nats_publish_probe_timeout,
         heartbeat_stale_seconds=settings.heartbeat_stale_seconds,
+        registration_token=settings.registration_token,
     )
     handler = StatusHandler(
         commands_repo=app.state.commands_repo,
         instances_repo=app.state.instances_repo,
     )
-    subscriber = StatusSubscriber(nc, handler)
+    subscriber = StatusSubscriber(
+        nc, handler, token_store=app.state.instances_repo
+    )
     await subscriber.start()
     log.info("status subscriber attached")
 

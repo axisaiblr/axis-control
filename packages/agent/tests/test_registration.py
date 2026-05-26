@@ -7,9 +7,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from axis_agent.control_plane import ControlPlaneUnreachable
+from axis_agent.control_plane import (
+    ControlPlaneUnreachable,
+    RegistrationOutcome,
+)
 from axis_agent.identity import AgentIdentity, AgentIdentityStore
 from axis_agent.registration import (
+    OVERRIDE_AGENT_TOKEN,
     RegistrationFailed,
     RegistrationInputs,
     ensure_identity,
@@ -21,18 +25,21 @@ class FakeControlPlaneClient:
     """Test double for ControlPlaneClient.register."""
 
     next_id: UUID = field(default_factory=uuid4)
+    next_token: str = "fake-minted-token-xxxxxxxxxxxxxxxxxx"
     fail_times: int = 0
     calls: int = 0
     last_payload: tuple[str, str] | None = None
 
     async def register(
         self, *, project_name: str, hostname: str
-    ) -> UUID:
+    ) -> RegistrationOutcome:
         self.calls += 1
         self.last_payload = (project_name, hostname)
         if self.calls <= self.fail_times:
             raise ControlPlaneUnreachable("connection refused (test)")
-        return self.next_id
+        return RegistrationOutcome(
+            instance_id=self.next_id, agent_token=self.next_token
+        )
 
 
 @pytest.fixture
@@ -63,6 +70,7 @@ async def test_override_instance_id_skips_store_and_client(
         project_name="text-assistant",
         hostname="worker-acme-01",
         registered_at=datetime.now(timezone.utc),
+        agent_token="persisted-token",
     )
     store.save(persisted)
     client = FakeControlPlaneClient()
@@ -71,8 +79,11 @@ async def test_override_instance_id_skips_store_and_client(
         inputs=inputs, store=store, client=client
     )
 
-    assert resolved == override
+    assert resolved.instance_id == override
+    # Override mode skips the per-instance secret: no token to present.
+    assert resolved.agent_token == OVERRIDE_AGENT_TOKEN
     assert client.calls == 0
+    # Override does not touch the persisted store.
     assert store.load() == persisted
 
 
@@ -85,6 +96,7 @@ async def test_persisted_identity_is_reused_without_calling_client(
         project_name="text-assistant",
         hostname="worker-acme-01",
         registered_at=datetime.now(timezone.utc),
+        agent_token="prev-run-token",
     )
     store.save(persisted)
     client = FakeControlPlaneClient()
@@ -93,7 +105,8 @@ async def test_persisted_identity_is_reused_without_calling_client(
         inputs=inputs, store=store, client=client
     )
 
-    assert resolved == persisted.instance_id
+    assert resolved == persisted
+    assert resolved.agent_token == "prev-run-token"
     assert client.calls == 0
 
 
@@ -107,12 +120,14 @@ async def test_no_persisted_state_registers_and_persists(
         inputs=inputs, store=store, client=client
     )
 
-    assert resolved == client.next_id
+    assert resolved.instance_id == client.next_id
+    assert resolved.agent_token == client.next_token
     assert client.calls == 1
     assert client.last_payload == ("text-assistant", "worker-acme-01")
     loaded = store.load()
     assert loaded is not None
     assert loaded.instance_id == client.next_id
+    assert loaded.agent_token == client.next_token
     assert loaded.project_name == "text-assistant"
     assert loaded.hostname == "worker-acme-01"
 
@@ -127,7 +142,8 @@ async def test_register_retries_with_bounded_backoff_then_succeeds(
         inputs=inputs, store=store, client=client
     )
 
-    assert resolved == client.next_id
+    assert resolved.instance_id == client.next_id
+    assert resolved.agent_token == client.next_token
     assert client.calls == 3
     assert store.load() is not None
 

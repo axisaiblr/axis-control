@@ -63,15 +63,20 @@ async def _fetch(
 async def test_full_reachability_and_workload_lifecycle(
     api_client: httpx.AsyncClient,
     nats_client: NatsClient,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
+    given_registered_instance: Callable[
+        ..., Awaitable[tuple[Instance, str]]
+    ],
 ) -> None:
-    instance = await given_registered_instance(project_name="text-assistant")
+    instance, agent_token = await given_registered_instance(
+        project_name="text-assistant"
+    )
 
     fake_compose = FakeComposeRunner()
     agent = Agent(
         instance_id=instance.id,
         nats_client=nats_client,
         compose_runner=fake_compose,
+        agent_token=agent_token,
     )
     await agent.start()
 
@@ -81,6 +86,7 @@ async def test_full_reachability_and_workload_lifecycle(
         nats_client=nats_client,
         interval_seconds=0.2,
         agent_version="lifecycle-test",
+        agent_token=agent_token,
     )
     await heartbeat.start()
 
@@ -126,6 +132,7 @@ async def test_full_reachability_and_workload_lifecycle(
             nats_client=nats_client,
             interval_seconds=0.2,
             agent_version="lifecycle-test",
+            agent_token=agent_token,
         )
         await heartbeat2.start()
         try:

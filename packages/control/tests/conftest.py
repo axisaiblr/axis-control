@@ -25,6 +25,11 @@ from axis_control.services.status_handler import StatusHandler
 # Mirror of packages/conftest.py HOST — pytest conftests aren't importable.
 HOST = "127.0.0.1"
 
+# Shared registration bootstrap token used by every authenticated test
+# call. Real deployments mint their own; the value here is opaque to
+# production code and only meaningful to tests.
+REGISTRATION_TOKEN_FOR_TESTS = "test-bootstrap-registration-token"
+
 
 @pytest.fixture(scope="session")
 def postgres_container() -> AsyncIterator[PostgresContainer]:
@@ -75,12 +80,15 @@ async def api_client(
             nats_client=app_nc,
             publish_probe_timeout=0.05,
             heartbeat_stale_seconds=1.0,
+            registration_token=REGISTRATION_TOKEN_FOR_TESTS,
         )
         handler = StatusHandler(
             commands_repo=app.state.commands_repo,
             instances_repo=app.state.instances_repo,
         )
-        subscriber = StatusSubscriber(app_nc, handler)
+        subscriber = StatusSubscriber(
+            app_nc, handler, token_store=app.state.instances_repo
+        )
         await subscriber.start()
         heartbeat_subscriber = HeartbeatSubscriber(
             app_nc, app.state.instances_repo
@@ -95,7 +103,11 @@ async def api_client(
         try:
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
+                transport=transport,
+                base_url="http://test",
+                headers={
+                    "Authorization": f"Bearer {REGISTRATION_TOKEN_FOR_TESTS}"
+                },
             ) as client:
                 yield client
         finally:
@@ -107,14 +119,38 @@ async def api_client(
 
 
 @pytest_asyncio.fixture
+async def api_client_unauthed(
+    api_client: httpx.AsyncClient,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Same backend as `api_client` but with no default Authorization
+    header. Use for 401 / wrong-token assertions."""
+    transport = api_client._transport
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
 async def given_registered_instance(
     db_pool: asyncpg.Pool,
-) -> Callable[..., Awaitable[Instance]]:
+) -> Callable[..., Awaitable[tuple[Instance, str]]]:
+    """Factory: insert a fully-provisioned instance row directly into
+    the DB (skipping the registration HTTP endpoint) and return both
+    the domain `Instance` and its plaintext `agent_token`. Tests that
+    publish to `status.<id>` / `heartbeat.<id>` need the token to pass
+    the control plane's message-level auth (#8)."""
+
+    from axis_control.domain.auth import mint_agent_token
+
     async def _factory(
         project_name: str, hostname: str = "worker-01"
-    ) -> Instance:
+    ) -> tuple[Instance, str]:
         project = new_project(name=project_name)
-        instance = new_instance(project, hostname=hostname)
+        token = mint_agent_token()
+        instance = new_instance(
+            project, hostname=hostname, agent_token=token
+        )
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO projects (id, name, created_at) VALUES ($1, $2, $3)",
@@ -125,16 +161,17 @@ async def given_registered_instance(
             await conn.execute(
                 "INSERT INTO instances "
                 "(id, project_id, project_name, hostname, workload_state, "
-                "created_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
+                "created_at, agent_token) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 instance.id,
                 instance.project_id,
                 instance.project_name,
                 instance.hostname,
                 instance.workload_state.value,
                 instance.created_at,
+                instance.agent_token,
             )
-        return instance
+        return instance, token
 
     return _factory
 
@@ -142,12 +179,12 @@ async def given_registered_instance(
 @pytest_asyncio.fixture
 async def given_pending_disable_command(
     db_pool: asyncpg.Pool,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
-) -> Callable[..., Awaitable[tuple[Instance, str]]]:
+    given_registered_instance: Callable[..., Awaitable[tuple[Instance, str]]],
+) -> Callable[..., Awaitable[tuple[Instance, str, str]]]:
     async def _factory(
         project_name: str, hostname: str = "worker-01"
-    ) -> tuple[Instance, str]:
-        instance = await given_registered_instance(
+    ) -> tuple[Instance, str, str]:
+        instance, agent_token = await given_registered_instance(
             project_name=project_name, hostname=hostname
         )
         command = new_command(
@@ -165,6 +202,6 @@ async def given_pending_disable_command(
                 command.issued_at,
                 None,
             )
-        return instance, str(command.id)
+        return instance, str(command.id), agent_token
 
     return _factory

@@ -36,12 +36,20 @@ times out. UI and operator tooling can match on this exact string."""
 
 
 class CommandMessage(BaseModel):
+    """Control-plane → agent command on `commands.<instance_id>`.
+    `agent_token` is the per-instance secret stamped by the control
+    plane from the instance row; the agent verifies it matches its
+    own persisted token and drops mismatching commands (#8) — this is
+    what stops a third party that can reach NATS from impersonating
+    the control plane on an open broker."""
+
     model_config = ConfigDict(frozen=True)
 
     command_id: UUID
     instance_id: UUID
     type: CommandType
     issued_at: datetime
+    agent_token: str
 
     @staticmethod
     def subject_for(instance_id: UUID) -> str:
@@ -49,6 +57,11 @@ class CommandMessage(BaseModel):
 
 
 class StatusMessage(BaseModel):
+    """Outcome of a command, published by the agent on
+    `status.<instance_id>`. `agent_token` is the per-instance secret
+    minted at registration; subscribers verify it against the stored
+    hash and drop reports with a missing or mismatching token (#8)."""
+
     model_config = ConfigDict(frozen=True)
 
     command_id: UUID
@@ -56,6 +69,7 @@ class StatusMessage(BaseModel):
     type: CommandType
     status: CommandStatus
     completed_at: datetime
+    agent_token: str
     detail: str | None = None
 
     @staticmethod
@@ -72,12 +86,17 @@ class HeartbeatMessage(BaseModel):
     `heartbeat.<instance_id>`. The control plane updates the matching
     instance's `last_heartbeat_at` and derives the `reachability`
     indicator from it. The optional `metadata` blob is reserved for
-    future health payload (CPU, memory, per-project metrics)."""
+    future health payload (CPU, memory, per-project metrics).
+
+    `agent_token` is the per-instance secret minted at registration;
+    the control plane verifies it against the stored hash and drops
+    heartbeats with a missing or mismatching token (#8)."""
 
     model_config = ConfigDict(frozen=True)
 
     instance_id: UUID
     agent_version: str
+    agent_token: str
     metadata: dict[str, str] | None = None
 
     @staticmethod

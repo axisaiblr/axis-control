@@ -85,6 +85,17 @@ synonyms; if a new concept appears, add it here.
   (`unknown` / `online` / `offline`); offline once the heartbeat is
   older than `AXIS_CONTROL_HEARTBEAT_STALE_SECONDS` (default 30 s).
   Not stored; computed on read.
+- **Bootstrap registration token** — shared secret configured on the
+  control plane as `AXIS_CONTROL_REGISTRATION_TOKEN`. Agents present
+  it as `Authorization: Bearer …` on `POST /api/instances`. No token
+  configured → every request 401s. Same value mirrored to each worker
+  as `AXIS_AGENT_REGISTRATION_TOKEN`.
+- **Agent token** — opaque per-instance secret minted by the control
+  plane at registration, persisted on the instance row and in the
+  agent's identity store. Stamped into every NATS message
+  (`status.<id>`, `heartbeat.<id>`, `commands.<id>`); the control
+  plane and agent both verify it in constant time and silently drop
+  mismatches.
 
 ## NATS subject taxonomy
 
@@ -182,13 +193,32 @@ the agent's identity cache to a named volume `axis_agent_state` so a
 restart does not re-register the worker, and defaults
 `AXIS_AGENT_COMPOSE_MODE` to `docker` (the dev `logging` default would
 silently drop every command on a production worker). Required env:
-`AXIS_AGENT_{PROJECT_NAME,CONTROL_PLANE_URL,NATS_URL,COMPOSE_FILE}`.
+`AXIS_AGENT_{PROJECT_NAME,CONTROL_PLANE_URL,NATS_URL,REGISTRATION_TOKEN,COMPOSE_FILE}`.
 Verified by `tests/test_worker_compose.py` (marker: `worker_compose`)
 which parses the rendered config and asserts the agent's image,
 restart policy, env wiring, both bind mounts, and the named state
-volume. Worker-side integration (agent registers, heartbeats, executes
-a command end-to-end) needs NATS exposed to remote workers and is
-gated on auth (#8).
+volume.
+
+**Authentication.** Every cross-host call is authenticated end-to-end
+via two opaque tokens (#8):
+
+- HTTP registration is gated by `AXIS_CONTROL_REGISTRATION_TOKEN` (a
+  shared bootstrap secret). Without it `POST /api/instances` refuses
+  every request — production-safe default; dev/test wiring sets the
+  value explicitly.
+- At registration the control plane mints a per-instance `agent_token`,
+  returns it in the 201 response, and persists it on the instance row.
+  The agent persists the same plaintext in its identity store
+  (`instance.json`).
+- Every NATS message stamps that token in its envelope. Status and
+  heartbeat subscribers compare it to the stored copy and silently
+  drop mismatches — late or spoofed reports cannot finalise a command
+  or flip reachability. The control plane's command publisher stamps
+  the same token; the agent compares it on receipt and silently drops
+  mismatches — a third party reachable to the broker cannot
+  impersonate the control plane. NATS *connection-level* auth (user/
+  pass on the broker, or per-instance NATS users) is a separate
+  follow-up; until it lands keep the broker on a private network.
 
 **Management-plane deployment.** `docker-compose.yml` at the repo root
 brings up the six-service management plane on the VPS:
@@ -220,8 +250,9 @@ after the next round of real usage.
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **Authentication** between agent and control plane (NATS user JWTs?
-  instance tokens? mTLS?). Currently the broker is open.
+- **NATS connection-level auth** — message-level auth landed in #8, but
+  the broker itself still accepts anonymous connections. Layering
+  user/pass (or per-instance NATS users) on top is a separate change.
 - **Admin UI** — HTMX pages over the existing API.
 - **Custom per-project metrics** — vmagent on each worker scrapes
   project metrics, ships to vmsingle on the management VPS; Grafana

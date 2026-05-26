@@ -14,7 +14,7 @@ from axis_agent.compose_runner import ComposeRunner
 from axis_agent.config import AgentSettings
 from axis_agent.control_plane import ControlPlaneClient
 from axis_agent.heartbeat import HeartbeatPublisher
-from axis_agent.identity import AgentIdentityStore
+from axis_agent.identity import AgentIdentity, AgentIdentityStore
 from axis_agent.registration import (
     RegistrationFailed,
     RegistrationInputs,
@@ -40,10 +40,7 @@ def _build_runner(settings: AgentSettings) -> ComposeRunner:
     return LoggingComposeRunner()
 
 
-async def _resolve_identity(settings: AgentSettings) -> AgentIdentityStore | None:
-    """Returns the store so the caller can act on it; instance_id is read
-    from `settings.instance_id` afterwards (mutated in place)."""
-
+async def _resolve_identity(settings: AgentSettings) -> AgentIdentity:
     store = AgentIdentityStore(state_dir=settings.state_dir)
     inputs = RegistrationInputs(
         project_name=settings.project_name,
@@ -56,12 +53,12 @@ async def _resolve_identity(settings: AgentSettings) -> AgentIdentityStore | Non
     async with httpx.AsyncClient(
         base_url=settings.control_plane_url, timeout=10.0
     ) as http:
-        client = ControlPlaneClient(http=http)
-        resolved = await ensure_identity(
+        client = ControlPlaneClient(
+            http=http, bootstrap_token=settings.registration_token
+        )
+        return await ensure_identity(
             inputs=inputs, store=store, client=client
         )
-    settings.instance_id = resolved
-    return store
 
 
 async def _run(settings: AgentSettings) -> None:
@@ -76,8 +73,7 @@ async def _run(settings: AgentSettings) -> None:
         settings.compose_mode,
     )
 
-    await _resolve_identity(settings)
-    assert settings.instance_id is not None  # set by _resolve_identity
+    identity = await _resolve_identity(settings)
 
     nc = await nats.connect(
         settings.nats_url, connect_timeout=5, max_reconnect_attempts=-1
@@ -86,20 +82,23 @@ async def _run(settings: AgentSettings) -> None:
 
     runner = _build_runner(settings)
     agent = Agent(
-        instance_id=settings.instance_id,
+        instance_id=identity.instance_id,
         nats_client=nc,
         compose_runner=runner,
+        agent_token=identity.agent_token,
     )
     await agent.start()
     log.info(
-        "subscribed; waiting for commands on commands.%s", settings.instance_id
+        "subscribed; waiting for commands on commands.%s",
+        identity.instance_id,
     )
 
     heartbeat = HeartbeatPublisher(
-        instance_id=settings.instance_id,
+        instance_id=identity.instance_id,
         nats_client=nc,
         interval_seconds=settings.heartbeat_interval_seconds,
         agent_version=AGENT_VERSION,
+        agent_token=identity.agent_token,
     )
     await heartbeat.start()
     log.info(

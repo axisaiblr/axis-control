@@ -31,6 +31,7 @@ async def test_publisher_emits_initial_heartbeat_immediately(
         nats_client=agent_nc,
         interval_seconds=60.0,  # long; we only want the immediate one
         agent_version="test-0.0.0",
+        agent_token="heartbeat-test-token",
     )
     await publisher.start()
     try:
@@ -38,6 +39,7 @@ async def test_publisher_emits_initial_heartbeat_immediately(
         body = HeartbeatMessage.model_validate_json(msg.data)
         assert body.instance_id == instance_id
         assert body.agent_version == "test-0.0.0"
+        assert body.agent_token == "heartbeat-test-token"
     finally:
         await publisher.stop()
 
@@ -61,6 +63,7 @@ async def test_publisher_emits_repeated_heartbeats_on_interval(
         nats_client=agent_nc,
         interval_seconds=0.1,
         agent_version="test-0.0.0",
+        agent_token="repeat-test-token",
     )
     await publisher.start()
     try:

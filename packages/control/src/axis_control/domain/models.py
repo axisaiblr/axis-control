@@ -58,16 +58,20 @@ class Instance:
     workload_state: WorkloadState = WorkloadState.UNKNOWN
     created_at: datetime = field(default_factory=_utcnow)
     last_heartbeat_at: datetime | None = None
+    agent_token: str | None = None
 
 
 def new_project(name: str) -> Project:
     return Project(id=uuid4(), name=name, created_at=_utcnow())
 
 
-def new_instance(project: Project, hostname: str) -> Instance:
+def new_instance(
+    project: Project, hostname: str, agent_token: str | None = None
+) -> Instance:
     return Instance(
         id=uuid4(),
         project_id=project.id,
         project_name=project.name,
         hostname=hostname,
+        agent_token=agent_token,
     )

@@ -23,6 +23,7 @@ class AgentIdentity:
     project_name: str
     hostname: str
     registered_at: datetime
+    agent_token: str
 
 
 class AgentIdentityStore:
@@ -45,6 +46,7 @@ class AgentIdentityStore:
             project_name=data["project_name"],
             hostname=data["hostname"],
             registered_at=datetime.fromisoformat(data["registered_at"]),
+            agent_token=data["agent_token"],
         )
 
     def save(self, identity: AgentIdentity) -> None:

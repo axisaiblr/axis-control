@@ -10,6 +10,7 @@ from axis_control.domain.commands import (
     CommandType,
     DeliveryHint,
 )
+from axis_control.services.command_dispatcher import InstanceNotRegistered
 
 
 class IssueCommandRequest(BaseModel):
@@ -49,7 +50,10 @@ async def issue_command(
     request: Request,
 ) -> IssueCommandResponse:
     dispatcher = request.app.state.command_dispatcher
-    result = await dispatcher.dispatch(instance_id, payload.type)
+    try:
+        result = await dispatcher.dispatch(instance_id, payload.type)
+    except InstanceNotRegistered as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     command = result.command
     return IssueCommandResponse(
         id=command.id,

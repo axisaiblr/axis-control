@@ -54,3 +54,11 @@ class ControlSettings(BaseSettings):
         "Should be a multiple of the agent's heartbeat interval so a "
         "single missed publish does not flip an instance offline.",
     )
+    registration_token: str | None = Field(
+        default=None,
+        description="Shared bootstrap secret an agent must present (as "
+        "`Authorization: Bearer <token>`) to call POST /api/instances. "
+        "If unset, the registration endpoint refuses every request — "
+        "production MUST set this. Generate with e.g. "
+        "`python -c \"import secrets; print(secrets.token_urlsafe(32))\"`.",
+    )
