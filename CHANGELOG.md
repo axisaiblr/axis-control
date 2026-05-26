@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-26
+
+First release that can take a real remote worker. The management VPS
+now exposes its NATS broker and vmsingle's remote-write endpoint to
+the public internet through Caddy, gated by a shared HTTP basicauth
+pair (`WORKER_BASICAUTH_*`) and defended in depth by the per-instance
+envelope token from PR #22.
+
+### Added
+- NATS broker network exposure (#26). Two new externally-reachable
+  endpoints, both on port 443, both reverse-proxied by Caddy with
+  TLS terminated upstream:
+  * `wss://nats.${ADMIN_DOMAIN}` — Caddy site-block gates the WebSocket
+    upgrade with HTTP basicauth, then forwards to an internal NATS
+    WebSocket listener (`nats/nats.conf`, port 8443). The broker stays
+    anonymous on the docker network; the gate lives in Caddy.
+  * `https://vm.${ADMIN_DOMAIN}/api/v1/write` (and `/api/v1/import`,
+    `/api/v2/write`) — Caddy site-block gates the remote-write POST
+    with the same basicauth pair, then forwards to `vmsingle:8428`.
+    Query (`/api/v1/query`, `/api/v1/query_range`) and admin
+    endpoints are deliberately NOT routed — they stay on the internal
+    docker network for Grafana to consume, so a leaked worker
+    credential is not a fleet-wide observability leak.
+- New env vars on the management VPS:
+  * `WORKER_BASICAUTH_USER` / `WORKER_BASICAUTH_HASH` — shared HTTP
+    basicauth credential gating both the NATS WSS gateway and the
+    vmsingle remote-write endpoint. Distinct from the operator
+    `BASICAUTH_*` credentials (#19): different audiences (humans vs.
+    machines), different rotation cadence, separate blast radius if
+    either leaks. Threat model is fleet-wide rotation; per-instance
+    migration is tracked in #27.
+  * `NATS_DOMAIN` / `VM_DOMAIN` — Caddy site-address overrides.
+    Default to `nats.${ADMIN_DOMAIN}` / `vm.${ADMIN_DOMAIN}`. Override
+    in dev when `ADMIN_DOMAIN` carries a scheme (e.g. `http://localhost`
+    — `nats.http://localhost` is not a valid Caddy site address).
+- `nats/nats.conf`: new NATS server config with a WebSocket listener
+  on port 8443 alongside the default 4222 client listener. Both
+  anonymous, both internal-only — Caddy is the only ingress.
+- `packages/agent` dependency: `nats-py[aiohttp]>=2.9` — the
+  WebSocket transport requires the aiohttp extras to be installed,
+  otherwise `nats.connect("wss://...")` fails at import-time.
+- ADR-0001 (`docs/adr/0001-nats-broker-exposure.md`) — the decision
+  tree behind option B (WSS through Caddy) over A (direct `:4222`),
+  C (NATS user JWTs), D (mTLS); B.1 (Caddy basicauth) over B.2 / B.3;
+  shared credential over per-instance; subdomain over path.
+- `CONTEXT.md` glossary: new terms `Broker URL` and
+  `Worker basicauth`. Code paths that reach the broker URL externally
+  or reference the worker basicauth use those terms — do not
+  introduce synonyms.
+- Eight new tests in `tests/test_caddyfile.py` +
+  `tests/test_production_compose.py`:
+  * static: NATS site-block has basicauth + reverse_proxy nats:8443;
+    VM site-block has the same auth + write-only routing (no
+    `/api/v1/query` passthrough); compose threads
+    `WORKER_BASICAUTH_*` + `NATS_DOMAIN` + `VM_DOMAIN` into caddy;
+    nats service mounts `nats.conf` and starts with `--config`;
+    `.env.example` documents the new env block + DNS preflight.
+  * integration: WSS publish→subscribe round-trip through real
+    Caddy + NATS; WSS without basicauth returns 401; WSS with wrong
+    basicauth returns 401; vmsingle remote-write happy path
+    (Prometheus-exposition POST + internal `/api/v1/query` returns
+    the sample); vmsingle remote-write without basicauth returns 401.
+- `.env.example` extended with a "Worker exposure: NATS + vmsingle
+  (#26)" section documenting the new credential pair, the DNS
+  preflight (operator must add A-records for `nats.${ADMIN_DOMAIN}`
+  and `vm.${ADMIN_DOMAIN}` alongside `grafana.${ADMIN_DOMAIN}`), the
+  `caddy hash-password` recipe (shared with the operator hash), and
+  the `$`→`$$` doubling rule for compose.
+
+### Changed
+- `docker-compose.yml` nats service no longer ships without auth on
+  an internal-only port (the previous "we'll expose when #8 lands"
+  comment is now obsolete). Instead it loads `nats/nats.conf` to
+  enable the WebSocket listener for the Caddy reverse-proxy.
+- Caddy environment gains four new variables passed through from the
+  host `.env`: `NATS_DOMAIN`, `VM_DOMAIN`, `WORKER_BASICAUTH_USER`,
+  `WORKER_BASICAUTH_HASH`. `NATS_DOMAIN` / `VM_DOMAIN` default to
+  `<sub>.${ADMIN_DOMAIN}` so an operator who only sets `ADMIN_DOMAIN`
+  still gets a working stack.
+- `CONTEXT.md` roadmap: the stale "NATS connection-level auth" bullet
+  is replaced by explicit issue links to #10 (per-project metrics
+  scrape side) and #27 (per-instance basicauth follow-up).
+
+### Operator preflight when upgrading to v0.2.0 on the mgmt VPS
+
+- DNS: add A-records for `nats.${ADMIN_DOMAIN}` and `vm.${ADMIN_DOMAIN}`
+  pointing at the management VPS public IP.
+- `.env`: add `WORKER_BASICAUTH_USER=worker` and
+  `WORKER_BASICAUTH_HASH=<bcrypt>` (`docker run --rm caddy:2-alpine
+  caddy hash-password --plaintext <pw>`, then double every `$` to
+  `$$` before pasting).
+- Hand the plaintext password to every worker VPS as
+  `WORKER_BASICAUTH_PASSWORD` (via Infisical) for the agent's NATS
+  WSS client and vmagent's `basicAuth.password`.
+
 ## [0.1.0] - 2026-05-26
 
 First release with a real deploy story: an operator can stand up the

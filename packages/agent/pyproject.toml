@@ -1,6 +1,6 @@
 [project]
 name = "axis-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Worker-side sidecar: listens to NATS commands and runs docker compose."
 requires-python = ">=3.12"
 dependencies = [
