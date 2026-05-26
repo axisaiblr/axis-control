@@ -15,4 +15,8 @@ async def agent_nc(nats_url: str) -> AsyncIterator[NatsClient]:
     try:
         yield nc
     finally:
-        await nc.drain()
+        # Use close() not drain(). drain() does an UNSUB-then-close that
+        # leaves the read loop running while pong futures are cancelled,
+        # which races _read_loop's PONG handler and surfaces as
+        # `InvalidStateError: invalid state` at teardown.
+        await nc.close()

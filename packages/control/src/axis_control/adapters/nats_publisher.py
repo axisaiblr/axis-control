@@ -31,12 +31,15 @@ class NatsCommandPublisher:
         self._client = client
         self._probe_timeout = probe_timeout
 
-    async def publish(self, command: Command) -> DeliveryHint:
+    async def publish(
+        self, command: Command, *, agent_token: str
+    ) -> DeliveryHint:
         message = CommandMessage(
             command_id=command.id,
             instance_id=command.instance_id,
             type=command.type,
             issued_at=command.issued_at,
+            agent_token=agent_token,
         )
         subject = CommandMessage.subject_for(command.instance_id)
         payload = message.model_dump_json().encode("utf-8")

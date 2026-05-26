@@ -134,8 +134,8 @@ class InstancesRepository:
             await conn.execute(
                 "INSERT INTO instances "
                 "(id, project_id, project_name, hostname, workload_state, "
-                "created_at, last_heartbeat_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "created_at, last_heartbeat_at, agent_token) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 instance.id,
                 instance.project_id,
                 instance.project_name,
@@ -143,13 +143,15 @@ class InstancesRepository:
                 instance.workload_state.value,
                 instance.created_at,
                 instance.last_heartbeat_at,
+                instance.agent_token,
             )
 
     async def get(self, instance_id: UUID) -> Instance | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, project_id, project_name, hostname, "
-                "workload_state, created_at, last_heartbeat_at "
+                "workload_state, created_at, last_heartbeat_at, "
+                "agent_token "
                 "FROM instances WHERE id = $1",
                 instance_id,
             )
@@ -163,7 +165,17 @@ class InstancesRepository:
             workload_state=WorkloadState(row["workload_state"]),
             created_at=row["created_at"],
             last_heartbeat_at=row["last_heartbeat_at"],
+            agent_token=row["agent_token"],
         )
+
+    async def get_agent_token(self, instance_id: UUID) -> str | None:
+        """Lookup-only path used by message subscribers (to verify
+        inbound) and the command dispatcher (to stamp outbound)."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT agent_token FROM instances WHERE id = $1",
+                instance_id,
+            )
 
     async def update_workload_state(
         self, instance_id: UUID, workload_state: WorkloadState

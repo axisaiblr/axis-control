@@ -29,16 +29,19 @@ class HeartbeatPublisher:
         nats_client: NatsClient,
         interval_seconds: float,
         agent_version: str,
+        agent_token: str,
     ) -> None:
         self._instance_id = instance_id
         self._nats = nats_client
         self._interval = interval_seconds
         self._agent_version = agent_version
+        self._agent_token = agent_token
         self._task: asyncio.Task[None] | None = None
         self._subject = HeartbeatMessage.subject_for(instance_id)
         self._payload = HeartbeatMessage(
             instance_id=instance_id,
             agent_version=agent_version,
+            agent_token=agent_token,
         ).model_dump_json().encode("utf-8")
 
     async def start(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -26,6 +27,12 @@ class Agent:
     docker compose action, then publishes the result on
     `status.<instance_id>`. Errors in compose execution surface as a
     `failed` status — never silently swallowed.
+
+    Inbound command authentication (#8): every CommandMessage carries
+    the per-instance `agent_token` stamped by the control plane. The
+    agent compares it against its own copy (from the identity store) in
+    constant time and drops mismatches — this is what stops a third
+    party reachable to the broker from impersonating the control plane.
     """
 
     def __init__(
@@ -33,10 +40,12 @@ class Agent:
         instance_id: UUID,
         nats_client: NatsClient,
         compose_runner: ComposeRunner,
+        agent_token: str,
     ) -> None:
         self._instance_id = instance_id
         self._nats = nats_client
         self._compose = compose_runner
+        self._agent_token = agent_token
         self._subscription: Subscription | None = None
 
     async def start(self) -> None:
@@ -44,6 +53,11 @@ class Agent:
             CommandMessage.subject_for(self._instance_id),
             cb=self._on_command,
         )
+        # Wait until the SUB protocol frame is acknowledged by the broker
+        # before returning. Without this, a command published immediately
+        # after `start()` returns (from any connection) can race the SUB
+        # to the server and be dropped — NATS core has no in-flight queue.
+        await self._nats.flush()
 
     async def stop(self) -> None:
         if self._subscription is not None:
@@ -57,6 +71,16 @@ class Agent:
             log.exception("invalid command payload on %s", msg.subject)
             return
 
+        if not self._agent_token or not hmac.compare_digest(
+            command.agent_token, self._agent_token
+        ):
+            log.warning(
+                "dropping command %s on %s: agent_token mismatch",
+                command.command_id,
+                msg.subject,
+            )
+            return
+
         result, detail = await self._execute(command.type)
 
         status = StatusMessage(
@@ -65,6 +89,7 @@ class Agent:
             type=command.type,
             status=result,
             completed_at=datetime.now(timezone.utc),
+            agent_token=self._agent_token,
             detail=detail,
         )
         await self._nats.publish(

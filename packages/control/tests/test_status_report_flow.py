@@ -29,14 +29,55 @@ async def _wait_until(
 
 
 @pytest.mark.asyncio
+async def test_status_report_with_wrong_token_leaves_command_pending(
+    api_client: httpx.AsyncClient,
+    nats_client: NatsClient,
+    given_pending_disable_command: Callable[
+        ..., Awaitable[tuple[Instance, str, str]]
+    ],
+) -> None:
+    """A status report with a token that does not match the instance's
+    stored hash must not move the command out of `pending` — the report
+    is treated as spoofed and dropped before the handler runs."""
+    instance, command_id, _legit_token = await given_pending_disable_command(
+        project_name="text-assistant"
+    )
+
+    spoofed = {
+        "command_id": command_id,
+        "instance_id": str(instance.id),
+        "type": CommandType.DISABLE.value,
+        "status": "completed",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "agent_token": "wrong-token-xxx",
+    }
+    await nats_client.publish(
+        f"status.{instance.id}",
+        json.dumps(spoofed).encode("utf-8"),
+    )
+    await nats_client.flush()
+
+    # Give the subscriber time to receive and (correctly) drop it.
+    await asyncio.sleep(0.3)
+
+    resp = await api_client.get(f"/api/commands/{command_id}")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pending", (
+        "spoofed status must not finalise the command"
+    )
+    instance_resp = await api_client.get(f"/api/instances/{instance.id}")
+    assert instance_resp.json()["workload_state"] == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_agent_status_report_completes_command_and_disables_instance(
     api_client: httpx.AsyncClient,
     nats_client: NatsClient,
     given_pending_disable_command: Callable[
-        ..., Awaitable[tuple[Instance, str]]
+        ..., Awaitable[tuple[Instance, str, str]]
     ],
 ) -> None:
-    instance, command_id = await given_pending_disable_command(
+    instance, command_id, agent_token = await given_pending_disable_command(
         project_name="text-assistant"
     )
 
@@ -46,6 +87,7 @@ async def test_agent_status_report_completes_command_and_disables_instance(
         "type": CommandType.DISABLE.value,
         "status": "completed",
         "completed_at": datetime.now(timezone.utc).isoformat(),
+        "agent_token": agent_token,
     }
     await nats_client.publish(
         f"status.{instance.id}",

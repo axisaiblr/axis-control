@@ -14,12 +14,15 @@ def test_save_then_load_returns_the_same_identity(tmp_path: Path) -> None:
         project_name="text-assistant",
         hostname="worker-acme-01",
         registered_at=datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+        agent_token="opaque-token-abcdefghijklmnop",
     )
 
     store.save(identity)
     loaded = store.load()
 
     assert loaded == identity
+    assert loaded is not None
+    assert loaded.agent_token == "opaque-token-abcdefghijklmnop"
 
 
 def test_load_on_empty_state_dir_returns_none(tmp_path: Path) -> None:
@@ -35,6 +38,7 @@ def test_clear_removes_the_persisted_identity(tmp_path: Path) -> None:
         project_name="voice-assistant",
         hostname="worker-acme-02",
         registered_at=datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+        agent_token="t2",
     )
     store.save(identity)
 
@@ -50,12 +54,14 @@ def test_save_overwrites_the_prior_identity(tmp_path: Path) -> None:
         project_name="text-assistant",
         hostname="worker-acme-01",
         registered_at=datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+        agent_token="t-first",
     )
     second = AgentIdentity(
         instance_id=uuid4(),
         project_name="text-assistant",
         hostname="worker-acme-01",
         registered_at=datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        agent_token="t-second",
     )
     store.save(first)
 

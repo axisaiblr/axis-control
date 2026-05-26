@@ -1,0 +1,185 @@
+# Production management-plane stack for the axis-control VPS.
+#
+# One file, one host, one command:
+#
+#   cp .env.example .env   # edit the secrets
+#   docker compose pull
+#   docker compose up -d
+#
+# Services that ship in v0.1:
+#   caddy        — TLS-terminating reverse proxy in front of axis-control
+#   postgres     — control-plane database (named volume, restart=unless-stopped)
+#   nats         — broker for commands / status / heartbeats
+#   axis-control — FastAPI control plane, image from GHCR
+#   vmsingle     — VictoriaMetrics single-node for fleet metrics
+#   grafana      — dashboards over vmsingle
+#
+# The local-dev compose lives at docker-compose.dev.yml and is irrelevant
+# in production.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-axis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-axis}
+    volumes:
+      - axis_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-axis} -d ${POSTGRES_DB:-axis}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    # No `ports:` — the broker is unauthenticated in v0.1, so it is
+    # reachable only to the other services on this docker network.
+    # When auth lands (#8) we can expose 4222 to remote agents.
+
+  axis-control:
+    image: ghcr.io/axisaiblr/axis-control:${AXIS_CONTROL_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      # Service-DNS targets — these resolve inside the docker network and
+      # are independent of the host-side .env (the dev `.env` uses 127.0.0.1
+      # which would not work from inside a container).
+      AXIS_CONTROL_DATABASE_URL: postgresql://${POSTGRES_USER:-axis}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-axis}
+      AXIS_CONTROL_NATS_URL: nats://nats:4222
+      AXIS_CONTROL_HTTP_HOST: "0.0.0.0"
+      AXIS_CONTROL_HTTP_PORT: "8000"
+      AXIS_CONTROL_LOG_LEVEL: ${AXIS_CONTROL_LOG_LEVEL:-INFO}
+      # Shared bootstrap secret an agent presents to POST /api/instances.
+      # Without it the endpoint refuses every request, so production
+      # MUST set AXIS_CONTROL_REGISTRATION_TOKEN in the host .env.
+      AXIS_CONTROL_REGISTRATION_TOKEN: ${AXIS_CONTROL_REGISTRATION_TOKEN}
+    # No `ports:` — caddy is the only entry point to the admin API.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - axis_caddy_data:/data
+      - axis_caddy_config:/config
+    environment:
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-localhost}
+      # Grafana subdomain site address (#19). Defaults to
+      # `grafana.${ADMIN_DOMAIN}` for the production case where
+      # ADMIN_DOMAIN is a bare hostname like `admin.example.com`. If
+      # ADMIN_DOMAIN carries a scheme (e.g. `http://localhost` in dev)
+      # set GRAFANA_DOMAIN explicitly — `grafana.http://localhost` is
+      # not a valid caddy site address.
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-grafana.${ADMIN_DOMAIN:-localhost}}
+      # Basicauth credentials for the admin API (#19). Hash is bcrypt;
+      # generate one with `docker run --rm caddy:2-alpine caddy hash-password`.
+      # Without these set, the Caddyfile loads basicauth with an empty
+      # credential set — every admin-API request 401s.
+      BASICAUTH_USER: ${BASICAUTH_USER}
+      BASICAUTH_HASH: ${BASICAUTH_HASH}
+      # IP allow-list for /api/instances/*/commands (#19). Space-separated
+      # CIDRs (e.g. "1.2.3.4/32 5.6.7.0/24"). Default `0.0.0.0/0` keeps
+      # the endpoint reachable for operators who have not yet built an
+      # allow-list — basicauth alone is still required.
+      ADMIN_ALLOW_CIDRS: ${ADMIN_ALLOW_CIDRS:-0.0.0.0/0}
+    depends_on:
+      - axis-control
+      - grafana
+
+  vmsingle:
+    image: victoriametrics/victoria-metrics:v1.106.1
+    restart: unless-stopped
+    # Retain a year of metrics by default. Tune on the VPS via .env.
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod=${VMSINGLE_RETENTION_PERIOD:-12}"
+    volumes:
+      - axis_vmsingle_data:/victoria-metrics-data
+    # No `ports:` — grafana queries vmsingle on the internal network.
+
+  backup:
+    # Daily pg_dump + vmsingle snapshot, uploaded to S3-compatible
+    # storage (Timeweb in production). Configured fully via the new
+    # AXIS_BACKUP_* env vars — see .env.example. See #18.
+    image: ghcr.io/axisaiblr/axis-backup:${AXIS_BACKUP_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      # pg_dump retries its own connect loop, so service_started is
+      # enough — we just need the postgres process to be up by the
+      # time the first scheduled tick fires.
+      - postgres
+    volumes:
+      # Read the vmsingle snapshot dir to tar it up. Read-only because
+      # the backup process never writes back into vmsingle's storage.
+      - type: volume
+        source: axis_vmsingle_data
+        target: /var/lib/vmsingle
+        read_only: true
+      # Rolling buffer of recent local snapshots. The image's
+      # entrypoint trims this to AXIS_BACKUP_LOCAL_RETENTION_DAYS files
+      # after each successful run, so an honest mistake (`docker compose
+      # down -v` minus the `-v`, a botched manual restore) is recoverable
+      # without pulling from the offsite bucket.
+      - axis_backup_data:/var/lib/axis-backup
+    environment:
+      # Postgres connection — reuse the same POSTGRES_* values the
+      # database itself uses, so the two cannot drift. pg_dump
+      # authenticates over the docker network.
+      AXIS_BACKUP_POSTGRES_HOST: postgres
+      AXIS_BACKUP_POSTGRES_PORT: "5432"
+      AXIS_BACKUP_POSTGRES_USER: ${POSTGRES_USER:-axis}
+      AXIS_BACKUP_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AXIS_BACKUP_POSTGRES_DB: ${POSTGRES_DB:-axis}
+      # VictoriaMetrics snapshot API. Local URL on the docker network;
+      # no auth (vmsingle does not expose host-side anyway).
+      AXIS_BACKUP_VMSINGLE_URL: http://vmsingle:8428
+      AXIS_BACKUP_VMSINGLE_SNAPSHOT_DIR: /var/lib/vmsingle/snapshots
+      # Offsite S3 target. Endpoint, bucket, and per-stack object
+      # prefix all come from .env so a deploy can point at any
+      # S3-compatible bucket (production: Timeweb Cloud S3).
+      AXIS_BACKUP_S3_ENDPOINT: ${AXIS_BACKUP_S3_ENDPOINT}
+      AXIS_BACKUP_S3_BUCKET: ${AXIS_BACKUP_S3_BUCKET}
+      AXIS_BACKUP_S3_PREFIX: ${AXIS_BACKUP_S3_PREFIX:-axis-control}
+      AXIS_BACKUP_S3_ACCESS_KEY_ID: ${AXIS_BACKUP_S3_ACCESS_KEY_ID}
+      AXIS_BACKUP_S3_SECRET_ACCESS_KEY: ${AXIS_BACKUP_S3_SECRET_ACCESS_KEY}
+      AXIS_BACKUP_S3_REGION: ${AXIS_BACKUP_S3_REGION:-ru-1}
+      # Schedule + local retention. Defaults baked in so an operator
+      # who only sets S3 creds still gets a working backup story:
+      # daily 02:00 UTC, 7 rolling local snapshots.
+      AXIS_BACKUP_CRON: ${AXIS_BACKUP_CRON:-0 2 * * *}
+      AXIS_BACKUP_LOCAL_RETENTION_DAYS: ${AXIS_BACKUP_LOCAL_RETENTION_DAYS:-7}
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    depends_on:
+      - vmsingle
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Disable anonymous access — the admin domain is reachable from
+      # the public internet via caddy.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - axis_grafana_data:/var/lib/grafana
+    # No host port — operator reaches Grafana via caddy (follow-up: add
+    # a `grafana.{$ADMIN_DOMAIN}` block to the Caddyfile).
+
+volumes:
+  axis_postgres_data:
+  axis_caddy_data:
+  axis_caddy_config:
+  axis_vmsingle_data:
+  axis_grafana_data:
+  axis_backup_data:

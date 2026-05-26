@@ -85,6 +85,17 @@ synonyms; if a new concept appears, add it here.
   (`unknown` / `online` / `offline`); offline once the heartbeat is
   older than `AXIS_CONTROL_HEARTBEAT_STALE_SECONDS` (default 30 s).
   Not stored; computed on read.
+- **Bootstrap registration token** — shared secret configured on the
+  control plane as `AXIS_CONTROL_REGISTRATION_TOKEN`. Agents present
+  it as `Authorization: Bearer …` on `POST /api/instances`. No token
+  configured → every request 401s. Same value mirrored to each worker
+  as `AXIS_AGENT_REGISTRATION_TOKEN`.
+- **Agent token** — opaque per-instance secret minted by the control
+  plane at registration, persisted on the instance row and in the
+  agent's identity store. Stamped into every NATS message
+  (`status.<id>`, `heartbeat.<id>`, `commands.<id>`); the control
+  plane and agent both verify it in constant time and silently drop
+  mismatches.
 
 ## NATS subject taxonomy
 
@@ -103,7 +114,10 @@ packages/
 ├── shared/         # NATS message schemas; protocol enums; subject helpers
 ├── control/        # FastAPI app + asyncpg + nats; domain/adapters/services/api
 └── agent/          # worker-side sidecar + compose runners
+tests/                  # workspace-level tests (production compose)
+docker-compose.yml      # production management-plane stack
 docker-compose.dev.yml  # local Postgres + NATS for dev
+caddy/Caddyfile         # reverse-proxy config used by docker-compose.yml
 ```
 
 Internal layering of `control` is hexagonal: `domain` (pure), `adapters`
@@ -152,6 +166,131 @@ Control deep modules added for the reachability split:
 bumps `last_heartbeat_at` on receipt), `domain.models.reachability_of`
 (pure function over `last_heartbeat_at + now + stale_after`).
 
+**Distribution.** Both packages ship as OCI images on GHCR
+(`ghcr.io/axisaiblr/axis-control`, `ghcr.io/axisaiblr/axis-agent`)
+built from `packages/{control,agent}/Dockerfile`. Multi-stage: `uv`
+builder produces a self-contained venv that's copied into a
+`python:3.12-slim-bookworm` runtime; the console scripts are the
+ENTRYPOINTs. The agent image additionally carries `docker-ce-cli` +
+`docker-compose-plugin` so it can shell out to `docker compose`
+against the worker host's bind-mounted `/var/run/docker.sock`.
+`.github/workflows/docker-publish.yml` builds + pushes on push to
+`main` (tagged `:edge`) and on `v*.*.*` tags (`:MAJOR.MINOR.PATCH`,
+`:MAJOR.MINOR`, `:latest`). linux/amd64 only for v1; tests in
+`packages/{control,agent}/tests/test_docker_image.py` (marker:
+`docker_image`) verify the entrypoint, ENTRYPOINT directive, and —
+for the agent — the docker CLI + compose plugin against a real
+build.
+
+**Worker-plane deployment.** `docker-compose.worker.yml` at the repo
+root ships the `axis-agent` sidecar as a drop-in next to the project's
+own compose file on each worker VPS. The operator runs both compose
+files together under one project name. The template bind-mounts
+`/var/run/docker.sock` and the host path the operator sets in
+`AXIS_AGENT_COMPOSE_FILE` (at the same path inside the container, so
+`docker compose -f <path>` resolves identically on both sides), pins
+the agent's identity cache to a named volume `axis_agent_state` so a
+restart does not re-register the worker, and defaults
+`AXIS_AGENT_COMPOSE_MODE` to `docker` (the dev `logging` default would
+silently drop every command on a production worker). Required env:
+`AXIS_AGENT_{PROJECT_NAME,CONTROL_PLANE_URL,NATS_URL,REGISTRATION_TOKEN,COMPOSE_FILE}`.
+Verified by `tests/test_worker_compose.py` (marker: `worker_compose`)
+which parses the rendered config and asserts the agent's image,
+restart policy, env wiring, both bind mounts, and the named state
+volume.
+
+**Authentication.** Every cross-host call is authenticated end-to-end
+via two opaque tokens (#8):
+
+- HTTP registration is gated by `AXIS_CONTROL_REGISTRATION_TOKEN` (a
+  shared bootstrap secret). Without it `POST /api/instances` refuses
+  every request — production-safe default; dev/test wiring sets the
+  value explicitly.
+- At registration the control plane mints a per-instance `agent_token`,
+  returns it in the 201 response, and persists it on the instance row.
+  The agent persists the same plaintext in its identity store
+  (`instance.json`).
+- Every NATS message stamps that token in its envelope. Status and
+  heartbeat subscribers compare it to the stored copy and silently
+  drop mismatches — late or spoofed reports cannot finalise a command
+  or flip reachability. The control plane's command publisher stamps
+  the same token; the agent compares it on receipt and silently drops
+  mismatches — a third party reachable to the broker cannot
+  impersonate the control plane. NATS *connection-level* auth (user/
+  pass on the broker, or per-instance NATS users) is a separate
+  follow-up; until it lands keep the broker on a private network.
+
+**Management-plane deployment.** `docker-compose.yml` at the repo root
+brings up the seven-service management plane on the VPS:
+`caddy` (TLS reverse proxy on `${ADMIN_DOMAIN}`, ACME-issued cert,
+ACME state on a named volume), `postgres` (named volume, healthcheck),
+`nats` (internal-only — no host port until NATS connection-level auth
+lands), `axis-control` (image from GHCR, wired to `postgres` + `nats`
+by service DNS, no host port — caddy is the only ingress),
+`vmsingle` (VictoriaMetrics single-node, named volume),
+`grafana` (admin password from env, named volume), and
+`backup` (image from GHCR, daily pg_dump + vmsingle snapshot uploaded
+to S3-compatible storage — see "Backup" below). Operator workflow:
+`cp .env.example .env`, fill the required secrets, `docker compose
+up -d`. Verified by `tests/test_production_compose.py`: static checks
+(marker `production_compose`) parse the rendered config and assert
+each service's image / volumes / ports / wiring; the slower
+`production_compose_integration` tests bring the stack up, exercise
+`caddy → axis-control:/healthz` plus the operator-facing Caddyfile
+behaviours (basicauth gate, agent-registration bypass, grafana
+subdomain), and confirm postgres data survives `down && up`. Grafana
+dashboard / datasource provisioning remains a follow-up.
+
+**Operator-facing Caddyfile** (#19) layers three protections on the
+admin domain:
+
+- **Grafana on `${GRAFANA_DOMAIN}`** — defaults to
+  `grafana.${ADMIN_DOMAIN}` via compose, reverse-proxied to
+  `grafana:3000`. Subdomain rather than path prefix sidesteps the
+  `GF_SERVER_ROOT_URL` / `serve_from_sub_path` Grafana gotcha.
+- **Basicauth on the admin API** — `{$BASICAUTH_USER}` /
+  `{$BASICAUTH_HASH}` from the host `.env`. Scope is everything on
+  the admin domain *except* `POST /api/instances` (token-gated by the
+  app — agents must register without operator creds) and `/healthz`
+  (docker healthcheck + external monitors). Hash is bcrypt, generated
+  with `caddy hash-password`; the `$` characters in the hash MUST be
+  doubled to `$$` in the `.env` file or compose interpolates them
+  away (recipe + warning in `.env.example`).
+- **IP allow-list on the destructive commands path** —
+  `POST /api/instances/*/commands` additionally requires the client
+  IP to fall inside `{$ADMIN_ALLOW_CIDRS}` (space-separated CIDRs,
+  default `0.0.0.0/0`). 403 to anything outside even with valid
+  basicauth.
+
+Long-poll-safe / SSE-friendly tweaks (no buffering, raised
+read-timeout for streamed responses) remain a follow-up — the
+existing `reverse_proxy` defaults are fine until a streaming endpoint
+ships on the control plane. Static checks in
+`tests/test_caddyfile.py`; behavioural checks in
+`tests/test_production_compose.py::test_operator_facing_caddyfile_behaviors`.
+
+**Backup.** The `backup` sidecar (#18) runs a cron loop on the
+management VPS — default schedule `0 2 * * *` UTC, override via
+`AXIS_BACKUP_CRON`. Each tick: pg_dumps the control DB over the
+docker network (creds reused from the same `POSTGRES_*` env the
+database itself uses, so they cannot drift), asks `vmsingle` to take
+a snapshot via `POST /snapshot/create`, tars the snapshot dir from
+the read-mounted `axis_vmsingle_data` volume, then uploads both
+artifacts to an S3-compatible bucket via `aws s3 cp --endpoint-url`.
+Bucket target in production is Timeweb Cloud S3
+(`https://s3.timeweb.cloud`); any S3-compatible endpoint works. A
+local rolling buffer on a dedicated `axis_backup_data` named volume
+keeps `AXIS_BACKUP_LOCAL_RETENTION_DAYS` (default 7) days of
+snapshots so a fat-fingered `docker compose down -v` is recoverable
+without a remote pull. Remote retention is a bucket lifecycle rule
+the operator sets on Timeweb — the image deliberately has no S3
+delete permission. Encryption is delegated to the bucket's at-rest
+encryption; a follow-up can layer `age`/`sops` if the threat model
+shifts. Image source at `packages/backup/{Dockerfile,backup.sh}`,
+published to GHCR as `ghcr.io/axisaiblr/axis-backup`. Restore is a
+manual flow documented in `.env.example`; an automated
+restore-roundtrip integration test is a follow-up.
+
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
@@ -163,13 +302,9 @@ after the next round of real usage.
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **Dockerfile for control + agent → GHCR pipeline.**
-- **Production `docker-compose.yml` for the management VPS** (caddy,
-  postgres, nats, axis-control, grafana, vmsingle).
-- **`docker-compose.worker.yml` template** (worker app + axis-agent
-  sidecar in one file, env-driven).
-- **Authentication** between agent and control plane (NATS user JWTs?
-  instance tokens? mTLS?). Currently the broker is open.
+- **NATS connection-level auth** — message-level auth landed in #8, but
+  the broker itself still accepts anonymous connections. Layering
+  user/pass (or per-instance NATS users) on top is a separate change.
 - **Admin UI** — HTMX pages over the existing API.
 - **Custom per-project metrics** — vmagent on each worker scrapes
   project metrics, ships to vmsingle on the management VPS; Grafana

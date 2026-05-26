@@ -32,11 +32,15 @@ async def _wait_until(
 @pytest.mark.asyncio
 async def test_command_to_unreachable_instance_returns_no_listeners_hint(
     api_client: httpx.AsyncClient,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
+    given_registered_instance: Callable[
+        ..., Awaitable[tuple[Instance, str]]
+    ],
 ) -> None:
     """When no agent is subscribed on `commands.<id>`, the POST response
     must include a machine-readable hint that no listener was reachable."""
-    instance = await given_registered_instance(project_name="text-assistant")
+    instance, agent_token = await given_registered_instance(
+        project_name="text-assistant"
+    )
 
     response = await api_client.post(
         f"/api/instances/{instance.id}/commands",
@@ -52,12 +56,16 @@ async def test_command_to_unreachable_instance_returns_no_listeners_hint(
 @pytest.mark.asyncio
 async def test_pending_command_times_out_to_failed_without_agent(
     api_client: httpx.AsyncClient,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
+    given_registered_instance: Callable[
+        ..., Awaitable[tuple[Instance, str]]
+    ],
 ) -> None:
     """The sweeper must move long-pending commands to a terminal `failed`
     state with a stable reason. Instance status must NOT change — we
     don't know what really happened on the (absent) worker."""
-    instance = await given_registered_instance(project_name="text-assistant")
+    instance, agent_token = await given_registered_instance(
+        project_name="text-assistant"
+    )
 
     response = await api_client.post(
         f"/api/instances/{instance.id}/commands",
@@ -94,7 +102,9 @@ async def test_pending_command_times_out_to_failed_without_agent(
 async def test_late_status_after_timeout_does_not_resurrect_command(
     api_client: httpx.AsyncClient,
     nats_client: NatsClient,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
+    given_registered_instance: Callable[
+        ..., Awaitable[tuple[Instance, str]]
+    ],
 ) -> None:
     """If an agent connects after a timeout fires and publishes a success
     status, the command must remain in its terminal `failed` state and
@@ -104,7 +114,9 @@ async def test_late_status_after_timeout_does_not_resurrect_command(
 
     from axis_control.domain.commands import CommandType
 
-    instance = await given_registered_instance(project_name="text-assistant")
+    instance, agent_token = await given_registered_instance(
+        project_name="text-assistant"
+    )
 
     response = await api_client.post(
         f"/api/instances/{instance.id}/commands",
@@ -126,6 +138,7 @@ async def test_late_status_after_timeout_does_not_resurrect_command(
         "type": CommandType.DISABLE.value,
         "status": "completed",
         "completed_at": datetime.now(timezone.utc).isoformat(),
+        "agent_token": agent_token,
     }
     await nats_client.publish(
         f"status.{instance.id}",

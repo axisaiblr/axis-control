@@ -51,9 +51,13 @@ async def test_fresh_instance_has_unknown_workload_state_and_no_status_field(
 async def test_successful_enable_command_flips_workload_state_to_enabled(
     api_client: httpx.AsyncClient,
     nats_client: NatsClient,
-    given_registered_instance: Callable[..., Awaitable[Instance]],
+    given_registered_instance: Callable[
+        ..., Awaitable[tuple[Instance, str]]
+    ],
 ) -> None:
-    instance = await given_registered_instance(project_name="text-assistant")
+    instance, agent_token = await given_registered_instance(
+        project_name="text-assistant"
+    )
 
     response = await api_client.post(
         f"/api/instances/{instance.id}/commands",
@@ -67,6 +71,7 @@ async def test_successful_enable_command_flips_workload_state_to_enabled(
         "type": "enable",
         "status": "completed",
         "completed_at": datetime.now(timezone.utc).isoformat(),
+        "agent_token": agent_token,
     }
     await nats_client.publish(
         f"status.{instance.id}",

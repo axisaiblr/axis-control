@@ -77,6 +77,14 @@ class AgentSettings(BaseSettings):
     register_max_backoff: float = Field(default=8.0, ge=0.0)
 
     nats_url: str = Field(default="nats://127.0.0.1:4222")
+    registration_token: str | None = Field(
+        default=None,
+        description="Shared bootstrap secret presented when self-"
+        "registering with the control plane. Must match the value "
+        "configured on the control plane as "
+        "`AXIS_CONTROL_REGISTRATION_TOKEN`. Required in production; "
+        "leave unset only when an `instance_id` override is used.",
+    )
     heartbeat_interval_seconds: float = Field(
         default=10.0,
         gt=0,
