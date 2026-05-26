@@ -29,8 +29,13 @@
 #   AXIS_AGENT_PROJECT_NAME      Logical project (e.g. text-assistant)
 #   AXIS_AGENT_CONTROL_PLANE_URL Base URL of the management VPS
 #   AXIS_AGENT_NATS_URL          NATS broker URL on the management VPS
-#                                (blocks on #8 — NATS is currently only
-#                                reachable on the management host)
+#                                (NATS messages are authenticated via
+#                                the per-instance agent_token under #8,
+#                                but connection-level NATS auth is a
+#                                separate follow-up — keep the broker
+#                                on a private network in the meantime)
+#   AXIS_AGENT_REGISTRATION_TOKEN  Shared bootstrap secret matching the
+#                                control plane's AXIS_CONTROL_REGISTRATION_TOKEN
 #   AXIS_AGENT_COMPOSE_FILE      Absolute host path to the project's
 #                                docker-compose.yml
 #
@@ -53,6 +58,10 @@ services:
       AXIS_AGENT_CONTROL_PLANE_URL: ${AXIS_AGENT_CONTROL_PLANE_URL}
       AXIS_AGENT_NATS_URL: ${AXIS_AGENT_NATS_URL}
       AXIS_AGENT_COMPOSE_FILE: ${AXIS_AGENT_COMPOSE_FILE}
+      # Bootstrap secret presented to POST /api/instances at first
+      # start. Must match AXIS_CONTROL_REGISTRATION_TOKEN on the
+      # management VPS.
+      AXIS_AGENT_REGISTRATION_TOKEN: ${AXIS_AGENT_REGISTRATION_TOKEN}
       # Worker default: drive the sibling project's compose for real.
       # `logging` is a dev-only dry-run that would silently drop every
       # disable/enable command on a production worker.

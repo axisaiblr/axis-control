@@ -57,6 +57,10 @@ services:
       AXIS_CONTROL_HTTP_HOST: "0.0.0.0"
       AXIS_CONTROL_HTTP_PORT: "8000"
       AXIS_CONTROL_LOG_LEVEL: ${AXIS_CONTROL_LOG_LEVEL:-INFO}
+      # Shared bootstrap secret an agent presents to POST /api/instances.
+      # Without it the endpoint refuses every request, so production
+      # MUST set AXIS_CONTROL_REGISTRATION_TOKEN in the host .env.
+      AXIS_CONTROL_REGISTRATION_TOKEN: ${AXIS_CONTROL_REGISTRATION_TOKEN}
     # No `ports:` — caddy is the only entry point to the admin API.
 
   caddy:

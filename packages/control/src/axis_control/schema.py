@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS instances (
     hostname TEXT NOT NULL,
     workload_state TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    last_heartbeat_at TIMESTAMPTZ
+    last_heartbeat_at TIMESTAMPTZ,
+    agent_token TEXT
 );
 
 -- Migration from pre-#3 schema: single `status` column carrying
@@ -49,6 +50,11 @@ BEGIN
 END$$;
 
 ALTER TABLE instances ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
+
+-- #8: per-instance agent token. Nullable because instances registered
+-- before this column existed have no token; they must re-register to
+-- acquire one and resume publishing on `status.<id>` / `heartbeat.<id>`.
+ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_token TEXT;
 
 CREATE TABLE IF NOT EXISTS commands (
     id UUID PRIMARY KEY,

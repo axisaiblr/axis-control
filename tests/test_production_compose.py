@@ -251,6 +251,13 @@ def test_axis_control_wired_to_postgres_and_nats() -> None:
         "axis-control NATS_URL must point at the nats service by name, "
         f"got {env.get('AXIS_CONTROL_NATS_URL')!r}"
     )
+    # Bootstrap secret for the registration endpoint (#8). Without it
+    # POST /api/instances refuses every request, so the management
+    # stack must thread it through from the host .env.
+    assert env.get("AXIS_CONTROL_REGISTRATION_TOKEN"), (
+        "axis-control must receive AXIS_CONTROL_REGISTRATION_TOKEN from "
+        "the host .env — without it agents cannot self-register"
+    )
 
     deps = _depends_on(control)
     assert "postgres" in deps, "axis-control must depends_on postgres"

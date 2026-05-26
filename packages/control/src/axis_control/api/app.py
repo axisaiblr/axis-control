@@ -24,6 +24,7 @@ def create_app(
     nats_client: NatsClient,
     publish_probe_timeout: float = 0.1,
     heartbeat_stale_seconds: float = 30.0,
+    registration_token: str | None = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
@@ -34,6 +35,12 @@ def create_app(
     (command timeout sweeper) are started separately — see
     `axis_control.adapters.nats_subscriber` and
     `axis_control.services.command_sweeper`.
+
+    `registration_token` is the shared bootstrap secret an agent must
+    present (as `Authorization: Bearer <token>`) to call
+    `POST /api/instances`. If `None`, the registration endpoint refuses
+    every request — production must always set one. Dev/test wiring
+    chooses the value explicitly.
     """
     app = FastAPI(title="axis-control")
 
@@ -47,7 +54,9 @@ def create_app(
     app.state.instances_repo = instances_repo
     app.state.projects_repo = projects_repo
     app.state.command_dispatcher = CommandDispatcher(
-        repo=commands_repo, publisher=publisher
+        repo=commands_repo,
+        publisher=publisher,
+        token_lookup=instances_repo,
     )
     app.state.registration_service = RegistrationService(
         projects_repo=projects_repo, instances_repo=instances_repo
@@ -55,6 +64,7 @@ def create_app(
     app.state.heartbeat_stale_after = timedelta(
         seconds=heartbeat_stale_seconds
     )
+    app.state.registration_token = registration_token
 
     app.include_router(commands_router)
     app.include_router(instances_router)
