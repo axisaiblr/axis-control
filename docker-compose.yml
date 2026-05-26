@@ -36,9 +36,19 @@ services:
   nats:
     image: nats:2.10-alpine
     restart: unless-stopped
-    # No `ports:` — the broker is unauthenticated in v0.1, so it is
-    # reachable only to the other services on this docker network.
-    # When auth lands (#8) we can expose 4222 to remote agents.
+    # Two listeners (#26):
+    #   nats://nats:4222   — internal-only, used by axis-control on the
+    #                        docker network. Anonymous; the network is
+    #                        the gate.
+    #   ws://nats:8443     — caddy reverse-proxies the externally-
+    #                        exposed wss://nats.${ADMIN_DOMAIN} onto
+    #                        this port. Anonymous too; basicauth gates
+    #                        in caddy (ADR-0001).
+    # No host port mapping — both listeners stay on the docker network;
+    # the only external ingress is caddy.
+    command: ["--config", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
 
   axis-control:
     image: ghcr.io/axisaiblr/axis-control:${AXIS_CONTROL_IMAGE_TAG:-latest}
@@ -82,12 +92,25 @@ services:
       # set GRAFANA_DOMAIN explicitly — `grafana.http://localhost` is
       # not a valid caddy site address.
       GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-grafana.${ADMIN_DOMAIN:-localhost}}
+      # Worker-facing subdomains (#26). Same `nats.${ADMIN_DOMAIN}` /
+      # `vm.${ADMIN_DOMAIN}` defaulting trick as GRAFANA_DOMAIN above —
+      # split out so an operator running with a scheme-prefixed
+      # ADMIN_DOMAIN (e.g. `http://localhost` in dev) can pin the
+      # subdomain to a valid caddy site address.
+      NATS_DOMAIN: ${NATS_DOMAIN:-nats.${ADMIN_DOMAIN:-localhost}}
+      VM_DOMAIN: ${VM_DOMAIN:-vm.${ADMIN_DOMAIN:-localhost}}
       # Basicauth credentials for the admin API (#19). Hash is bcrypt;
       # generate one with `docker run --rm caddy:2-alpine caddy hash-password`.
       # Without these set, the Caddyfile loads basicauth with an empty
       # credential set — every admin-API request 401s.
       BASICAUTH_USER: ${BASICAUTH_USER}
       BASICAUTH_HASH: ${BASICAUTH_HASH}
+      # Worker basicauth (#26) — separate audience from the operator
+      # credentials above. Gates the wss:// NATS gateway and the
+      # vmsingle remote-write endpoint. Shared across the worker fleet
+      # for v1; per-instance migration is #27.
+      WORKER_BASICAUTH_USER: ${WORKER_BASICAUTH_USER}
+      WORKER_BASICAUTH_HASH: ${WORKER_BASICAUTH_HASH}
       # IP allow-list for /api/instances/*/commands (#19). Space-separated
       # CIDRs (e.g. "1.2.3.4/32 5.6.7.0/24"). Default `0.0.0.0/0` keeps
       # the endpoint reachable for operators who have not yet built an

@@ -21,6 +21,26 @@
 	}
 }
 
+# NATS broker exposure to remote workers (#26, ADR-0001). Caddy
+# terminates TLS, gates with the shared `WORKER_BASICAUTH_*`
+# credential, and reverse-proxies the WebSocket upgrade onto the
+# internal `ws://nats:8443` listener. The broker itself stays
+# anonymous on the docker network; basicauth is the only gate.
+# `reverse_proxy` handles WebSocket upgrades transparently — no
+# extra directive needed beyond pointing at the upstream.
+# Requires DNS for `nats.${ADMIN_DOMAIN}` on the VPS.
+{$NATS_DOMAIN} {
+	basicauth {
+		{$WORKER_BASICAUTH_USER} {$WORKER_BASICAUTH_HASH}
+	}
+	reverse_proxy nats:8443
+
+	log {
+		output stdout
+		format console
+	}
+}
+
 {$ADMIN_DOMAIN} {
 	# /healthz is reachable without auth — caddy's own healthcheck,
 	# external uptime monitors, and a docker-level depends_on probe

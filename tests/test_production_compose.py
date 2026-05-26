@@ -52,6 +52,17 @@ INTEGRATION_BASICAUTH_HASH = (
     "$2a$14$AOGr9G.Nxov9UY0JcF..eeJzFE/EvqvqGxMXdZcZ7WrXn2BZx.ahi"
 )
 
+# Worker basicauth (#26) — separate audience and rotation cadence
+# from the operator basicauth above. Hash generated once with
+#   docker run --rm caddy:2-alpine caddy hash-password --plaintext worker-pw
+# and checked in for reproducibility (bcrypt's salt is non-deterministic
+# so any hash that round-trips against the plaintext works).
+INTEGRATION_WORKER_BASICAUTH_USER = "worker"
+INTEGRATION_WORKER_BASICAUTH_PASSWORD = "worker-pw"
+INTEGRATION_WORKER_BASICAUTH_HASH = (
+    "$2a$14$S2kt3Nx8OwKeINhWi7/Me.mIbgUzjomqkAG5baXNJfu7qCWXnnhJy"
+)
+
 # Default marker for everything in this file. Individual integration
 # tests opt in to the heavier marker as well.
 pytestmark = pytest.mark.production_compose
@@ -696,6 +707,18 @@ def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
                 f"BASICAUTH_HASH={INTEGRATION_BASICAUTH_HASH.replace('$', '$$')}",
                 "GRAFANA_DOMAIN=http://grafana.localhost",
                 "ADMIN_ALLOW_CIDRS=0.0.0.0/0",
+                # Worker basicauth (#26). Same `$$`-doubling trick the
+                # operator hash uses — bcrypt segments like `$AOGr9G`
+                # would otherwise be eaten by compose's $-interpolation.
+                # NATS_DOMAIN / VM_DOMAIN are split out from ADMIN_DOMAIN
+                # for the same reason GRAFANA_DOMAIN is: ADMIN_DOMAIN
+                # carries `http://` to opt caddy out of auto-HTTPS, so
+                # `nats.${ADMIN_DOMAIN}` would render as the invalid site
+                # address `nats.http://localhost`.
+                f"WORKER_BASICAUTH_USER={INTEGRATION_WORKER_BASICAUTH_USER}",
+                f"WORKER_BASICAUTH_HASH={INTEGRATION_WORKER_BASICAUTH_HASH.replace('$', '$$')}",
+                "NATS_DOMAIN=http://nats.localhost",
+                "VM_DOMAIN=http://vm.localhost",
             ]
         )
         + "\n",
@@ -1024,4 +1047,59 @@ def test_operator_facing_caddyfile_behaviors(integration_stack: _Stack) -> None:
     assert r.status_code in (200, 301, 302), (
         f"grafana subdomain did not reverse-proxy to grafana:3000 — "
         f"got HTTP {r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_gates_nats_ws_round_trip(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 4 (#26): a remote worker can publish→subscribe through the
+    caddy-fronted NATS endpoint when it presents the shared worker
+    basicauth credential. The internal nats broker is anonymous on the
+    docker network; caddy is the only gate.
+
+    This is the tracer-bullet for the whole NATS broker exposure
+    feature: it forces every moving part into the test path —
+    Caddyfile site-block for {$NATS_DOMAIN}, the WebSocket reverse-
+    proxy, the basicauth directive, the new nats.conf with a websocket
+    listener, the compose-wiring that mounts nats.conf, and the
+    operator-side env vars. If this round-trip succeeds, the rest of
+    the work is regression-defence.
+
+    The test fixture connects to 127.0.0.1:<caddy_port> with
+    Host: nats.localhost — same trick existing tests use to exercise
+    caddy site routing without needing real DNS or TLS."""
+    import asyncio
+
+    import nats
+
+    async def round_trip() -> str:
+        # nats-py's WebSocket transport reads the Host header from the
+        # URL; to make caddy route to the nats.localhost site block we
+        # need the URL host to be `nats.localhost`. Build a connect URL
+        # that points at 127.0.0.1 but force the Host through nats-py's
+        # `tls_hostname` / server-side mapping is not available — use
+        # an explicit servers= list where the host is nats.localhost
+        # and the port is the kernel-assigned caddy port. `nats.localhost`
+        # resolves to 127.0.0.1 on every OS we deploy on.
+        servers = [
+            f"ws://{INTEGRATION_WORKER_BASICAUTH_USER}:"
+            f"{INTEGRATION_WORKER_BASICAUTH_PASSWORD}"
+            f"@nats.localhost:{integration_stack.caddy_host_port}"
+        ]
+        nc = await nats.connect(servers=servers, connect_timeout=10)
+        try:
+            sub = await nc.subscribe("test.tracer")
+            await nc.flush(timeout=5)
+            await nc.publish("test.tracer", b"hello-worker")
+            msg = await asyncio.wait_for(sub.next_msg(timeout=5), timeout=10)
+            return msg.data.decode()
+        finally:
+            await nc.drain()
+
+    received = asyncio.run(round_trip())
+    assert received == "hello-worker", (
+        f"WSS round-trip through caddy → nats failed at the assertion "
+        f"layer. Connection opened but payload was {received!r}."
     )
