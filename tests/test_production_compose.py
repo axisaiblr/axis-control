@@ -803,6 +803,21 @@ class _Stack:
             args.append("--volumes")
         self._compose(*args, check=False)
 
+    def exec_in(self, service: str, *cmd: str) -> str:
+        """Run a command inside a running service container and return
+        stdout. Used to query the internal vmsingle (not exposed via
+        caddy in any non-write capacity) so an integration test can
+        confirm a remote-written sample actually landed in storage."""
+        proc = self._compose("exec", "-T", service, *cmd, check=False)
+        if proc.returncode != 0:
+            pytest.fail(
+                f"`docker compose exec {service} {' '.join(cmd)}` failed "
+                f"(exit {proc.returncode}):\n"
+                f"--- stdout ---\n{proc.stdout}\n"
+                f"--- stderr ---\n{proc.stderr}"
+            )
+        return proc.stdout
+
 
 @pytest.fixture
 def integration_stack(
@@ -1147,4 +1162,105 @@ def test_worker_basicauth_wrong_returns_401_on_nats_ws(
         f"NATS WSS endpoint with wrong basicauth must 401 — caddy is "
         f"accepting credentials it should reject. Got HTTP "
         f"{r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_gates_vmsingle_remote_write(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 7 (#26): a worker pushing metrics through
+    https://vm.${ADMIN_DOMAIN}/api/v1/import/prometheus with the shared
+    worker basicauth lands a sample in vmsingle's storage, queryable
+    over the internal docker network.
+
+    Two-step assertion: the POST returns 2xx (caddy → vmsingle path
+    works), then a /api/v1/query against the *internal* vmsingle
+    returns the written sample. The second step is what proves the
+    bytes survived the round-trip — a 2xx from vmsingle on import
+    means "accepted", not "persisted yet"."""
+    import json
+    import uuid as uuid_mod
+
+    base = f"http://127.0.0.1:{integration_stack.caddy_host_port}"
+    metric_name = f"test_tracer_{uuid_mod.uuid4().hex[:8]}"
+    # Standard Prometheus exposition format. HELP/TYPE comments are
+    # required by some VictoriaMetrics versions for /api/v1/import/prometheus
+    # to accept the sample; they're cheap belt-and-braces here.
+    sample = (
+        f"# HELP {metric_name} tracer metric for the slice-7 test\n"
+        f"# TYPE {metric_name} gauge\n"
+        f"{metric_name} 42\n"
+    ).encode("utf-8")
+
+    write = httpx.post(
+        f"{base}/api/v1/import/prometheus",
+        content=sample,
+        headers={"Host": "vm.localhost", "Content-Type": "text/plain"},
+        auth=(
+            INTEGRATION_WORKER_BASICAUTH_USER,
+            INTEGRATION_WORKER_BASICAUTH_PASSWORD,
+        ),
+        timeout=10.0,
+    )
+    assert 200 <= write.status_code < 300, (
+        f"vmsingle remote-write with correct basicauth must succeed. "
+        f"Got HTTP {write.status_code}: {write.text[:200]}"
+    )
+
+    # vmsingle has a default `-search.latencyOffset=30s` which holds
+    # back recently-ingested samples from instant queries by ~30s.
+    # Poll up to 90 s to clear that window with safety margin.
+    deadline = time.monotonic() + 90
+    last_payload: str = "no attempt"
+    while time.monotonic() < deadline:
+        # Query through the caddy container (alpine, has wget) since
+        # vmsingle's own image either lacks wget or refuses loopback
+        # connects. Docker DNS resolves `vmsingle:8428` inside the
+        # compose network.
+        raw = integration_stack.exec_in(
+            "caddy",
+            "wget", "-qO-",
+            f"http://vmsingle:8428/api/v1/query?query={metric_name}",
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            last_payload = raw[:200]
+            time.sleep(1)
+            continue
+        result = payload.get("data", {}).get("result", [])
+        if result:
+            assert result[0]["value"][1] == "42", (
+                f"vmsingle returned the metric but with the wrong value: "
+                f"{result[0]['value']}"
+            )
+            return
+        last_payload = raw[:200]
+        time.sleep(1)
+    pytest.fail(
+        f"vmsingle never returned the written sample within 30s. "
+        f"Last query payload: {last_payload}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_missing_returns_401_on_vm_remote_write(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 8 (#26): symmetric negative-path for the vmsingle write
+    endpoint. Without basicauth caddy must 401 before the body reaches
+    vmsingle — workers leaking metrics to anyone who can reach the
+    subdomain would be a substantial information disclosure."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/api/v1/import/prometheus"
+    r = httpx.post(
+        url,
+        content=b"open_sesame 1\n",
+        headers={"Host": "vm.localhost"},
+        timeout=5.0,
+    )
+    assert r.status_code == 401, (
+        f"vmsingle remote-write without basicauth must 401 — caddy is "
+        f"letting traffic through. Got HTTP {r.status_code}: "
+        f"{r.text[:200]}"
     )
