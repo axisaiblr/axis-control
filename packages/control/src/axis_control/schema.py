@@ -31,8 +31,11 @@ CREATE TABLE IF NOT EXISTS commands (
     type TEXT NOT NULL,
     status TEXT NOT NULL,
     issued_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    failure_reason TEXT
 );
+
+ALTER TABLE commands ADD COLUMN IF NOT EXISTS failure_reason TEXT;
 """
 
 

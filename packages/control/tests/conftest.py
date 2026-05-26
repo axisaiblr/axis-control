@@ -18,6 +18,7 @@ from axis_control.domain.commands import (
 )
 from axis_control.domain.models import Instance, new_instance, new_project
 from axis_control.schema import SCHEMA_DDL
+from axis_control.services.command_sweeper import CommandTimeoutSweeper
 from axis_control.services.status_handler import StatusHandler
 
 # Mirror of packages/conftest.py HOST — pytest conftests aren't importable.
@@ -65,13 +66,26 @@ async def api_client(
         nats_url, connect_timeout=2, max_reconnect_attempts=1
     )
     try:
-        app = create_app(db_pool=db_pool, nats_client=app_nc)
+        # Short probe timeout keeps the no-listener happy-path test snappy;
+        # a short command timeout + sweep interval keeps the timeout
+        # regression tests under a few seconds.
+        app = create_app(
+            db_pool=db_pool,
+            nats_client=app_nc,
+            publish_probe_timeout=0.05,
+        )
         handler = StatusHandler(
             commands_repo=app.state.commands_repo,
             instances_repo=app.state.instances_repo,
         )
         subscriber = StatusSubscriber(app_nc, handler)
         await subscriber.start()
+        sweeper = CommandTimeoutSweeper(
+            commands_repo=app.state.commands_repo,
+            timeout_seconds=2.0,
+            sweep_interval_seconds=0.1,
+        )
+        await sweeper.start()
         try:
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -79,6 +93,7 @@ async def api_client(
             ) as client:
                 yield client
         finally:
+            await sweeper.stop()
             await subscriber.stop()
     finally:
         await app_nc.drain()

@@ -12,6 +12,7 @@ from axis_control.adapters.nats_subscriber import StatusSubscriber
 from axis_control.api.app import create_app
 from axis_control.config import ControlSettings
 from axis_control.schema import apply_schema
+from axis_control.services.command_sweeper import CommandTimeoutSweeper
 from axis_control.services.status_handler import StatusHandler
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,11 @@ async def _run(settings: ControlSettings) -> None:
     )
     log.info("connected to NATS at %s", settings.nats_url)
 
-    app = create_app(db_pool=pool, nats_client=nc)
+    app = create_app(
+        db_pool=pool,
+        nats_client=nc,
+        publish_probe_timeout=settings.nats_publish_probe_timeout,
+    )
     handler = StatusHandler(
         commands_repo=app.state.commands_repo,
         instances_repo=app.state.instances_repo,
@@ -44,6 +49,18 @@ async def _run(settings: ControlSettings) -> None:
     subscriber = StatusSubscriber(nc, handler)
     await subscriber.start()
     log.info("status subscriber attached")
+
+    sweeper = CommandTimeoutSweeper(
+        commands_repo=app.state.commands_repo,
+        timeout_seconds=settings.command_timeout_seconds,
+        sweep_interval_seconds=settings.command_sweep_interval_seconds,
+    )
+    await sweeper.start()
+    log.info(
+        "command timeout sweeper started (timeout=%.1fs interval=%.1fs)",
+        settings.command_timeout_seconds,
+        settings.command_sweep_interval_seconds,
+    )
 
     config = uvicorn.Config(
         app,
@@ -74,6 +91,7 @@ async def _run(settings: ControlSettings) -> None:
         await serve_task
 
     log.info("shutting down")
+    await sweeper.stop()
     await subscriber.stop()
     await nc.drain()
     await pool.close()
