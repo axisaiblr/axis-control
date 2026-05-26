@@ -103,7 +103,10 @@ packages/
 ├── shared/         # NATS message schemas; protocol enums; subject helpers
 ├── control/        # FastAPI app + asyncpg + nats; domain/adapters/services/api
 └── agent/          # worker-side sidecar + compose runners
+tests/                  # workspace-level tests (production compose)
+docker-compose.yml      # production management-plane stack
 docker-compose.dev.yml  # local Postgres + NATS for dev
+caddy/Caddyfile         # reverse-proxy config used by docker-compose.yml
 ```
 
 Internal layering of `control` is hexagonal: `domain` (pure), `adapters`
@@ -168,6 +171,25 @@ against the worker host's bind-mounted `/var/run/docker.sock`.
 for the agent — the docker CLI + compose plugin against a real
 build.
 
+**Management-plane deployment.** `docker-compose.yml` at the repo root
+brings up the six-service management plane on the VPS:
+`caddy` (TLS reverse proxy on `${ADMIN_DOMAIN}`, ACME-issued cert,
+ACME state on a named volume), `postgres` (named volume, healthcheck),
+`nats` (internal-only — no host port until auth lands in #8),
+`axis-control` (image from GHCR, wired to `postgres` + `nats` by
+service DNS, no host port — caddy is the only ingress),
+`vmsingle` (VictoriaMetrics single-node, named volume), and
+`grafana` (admin password from env, named volume). Operator workflow:
+`cp .env.example .env`, fill the required secrets, `docker compose
+up -d`. Verified by `tests/test_production_compose.py`: static checks
+(marker `production_compose`) parse the rendered config and assert
+each service's image / volumes / ports / wiring; the slower
+`production_compose_integration` tests bring the stack up, exercise
+`caddy → axis-control:/healthz`, and confirm postgres data survives
+`down && up`. Grafana provisioning, the full operator-facing Caddyfile
+(grafana routing, basic auth, etc.), and the backup story for the
+postgres + vmsingle volumes are follow-ups.
+
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
@@ -179,8 +201,6 @@ after the next round of real usage.
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **Production `docker-compose.yml` for the management VPS** (caddy,
-  postgres, nats, axis-control, grafana, vmsingle).
 - **`docker-compose.worker.yml` template** (worker app + axis-agent
   sidecar in one file, env-driven).
 - **Authentication** between agent and control plane (NATS user JWTs?

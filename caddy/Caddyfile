@@ -1,0 +1,21 @@
+# Caddy v2 config for the management plane.
+#
+# Caddy substitutes {$ADMIN_DOMAIN} from the container environment (set
+# by docker-compose.yml). Setting ADMIN_DOMAIN=localhost in `.env` keeps
+# this file usable for local production-compose testing; setting it to
+# a real DNS name on the VPS triggers automatic Let's Encrypt issuance
+# the first time the cert is needed.
+#
+# This file ships intentionally minimal. Grafana routing, custom error
+# pages, basic auth, and any rate limiting are follow-ups.
+
+{$ADMIN_DOMAIN} {
+	# axis-control is reachable on the docker network by service name.
+	reverse_proxy axis-control:8000
+
+	# Logs go to stdout (collected by `docker compose logs caddy`).
+	log {
+		output stdout
+		format console
+	}
+}
