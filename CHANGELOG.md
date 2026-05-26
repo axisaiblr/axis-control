@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Worker `docker-compose.worker.yml` template that ships the `axis-agent`
+  sidecar as a drop-in next to a project's own compose file on a worker
+  VPS. Run both compose files together under one project name; the
+  template parameterises the agent over
+  `AXIS_AGENT_{PROJECT_NAME,CONTROL_PLANE_URL,NATS_URL,COMPOSE_FILE}`
+  (+ optional tag / hostname / heartbeat overrides), bind-mounts
+  `/var/run/docker.sock` and the project compose at the same host
+  path inside the container (so `docker compose -f` resolves
+  identically on both sides), defaults `AXIS_AGENT_COMPOSE_MODE` to
+  `docker` (the dev `logging` default would silently no-op every
+  command on a worker), and pins the agent's identity cache to a named
+  volume `axis_agent_state` so a restart does not re-register the
+  worker as a fresh instance.
+- New pytest marker `worker_compose` and static checks under
+  `tests/test_worker_compose.py` (parsed via `docker compose config`).
+- `.env.example` extended with a new worker-stack section documenting
+  the required and optional `AXIS_AGENT_*` env vars for the worker
+  template.
 - Production `docker-compose.yml` for the management VPS, plus a minimal
   `caddy/Caddyfile`. One file, one host, one command:
   `cp .env.example .env && docker compose up -d` brings up caddy (TLS

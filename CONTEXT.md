@@ -171,6 +171,25 @@ against the worker host's bind-mounted `/var/run/docker.sock`.
 for the agent — the docker CLI + compose plugin against a real
 build.
 
+**Worker-plane deployment.** `docker-compose.worker.yml` at the repo
+root ships the `axis-agent` sidecar as a drop-in next to the project's
+own compose file on each worker VPS. The operator runs both compose
+files together under one project name. The template bind-mounts
+`/var/run/docker.sock` and the host path the operator sets in
+`AXIS_AGENT_COMPOSE_FILE` (at the same path inside the container, so
+`docker compose -f <path>` resolves identically on both sides), pins
+the agent's identity cache to a named volume `axis_agent_state` so a
+restart does not re-register the worker, and defaults
+`AXIS_AGENT_COMPOSE_MODE` to `docker` (the dev `logging` default would
+silently drop every command on a production worker). Required env:
+`AXIS_AGENT_{PROJECT_NAME,CONTROL_PLANE_URL,NATS_URL,COMPOSE_FILE}`.
+Verified by `tests/test_worker_compose.py` (marker: `worker_compose`)
+which parses the rendered config and asserts the agent's image,
+restart policy, env wiring, both bind mounts, and the named state
+volume. Worker-side integration (agent registers, heartbeats, executes
+a command end-to-end) needs NATS exposed to remote workers and is
+gated on auth (#8).
+
 **Management-plane deployment.** `docker-compose.yml` at the repo root
 brings up the six-service management plane on the VPS:
 `caddy` (TLS reverse proxy on `${ADMIN_DOMAIN}`, ACME-issued cert,
@@ -201,8 +220,6 @@ after the next round of real usage.
 Filed as `needs-triage` issues so they don't get forgotten, but each
 needs its own design conversation before becoming actionable:
 
-- **`docker-compose.worker.yml` template** (worker app + axis-agent
-  sidecar in one file, env-driven).
 - **Authentication** between agent and control plane (NATS user JWTs?
   instance tokens? mTLS?). Currently the broker is open.
 - **Admin UI** — HTMX pages over the existing API.
