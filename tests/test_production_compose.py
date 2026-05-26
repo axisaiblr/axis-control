@@ -1124,3 +1124,27 @@ def test_worker_basicauth_missing_returns_401_on_nats_ws(
         f"letting traffic through to the broker. Got HTTP "
         f"{r.status_code}: {r.text[:200]}"
     )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_wrong_returns_401_on_nats_ws(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 6 (#26): basicauth actually validates the credential —
+    presenting a syntactically-valid but wrong user/password pair must
+    still 401, not pass through because "an Authorization header is
+    present". Defends against future Caddyfile edits that accidentally
+    weaken the directive (e.g. flipping the order so the matcher
+    short-circuits the check)."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/"
+    r = httpx.get(
+        url,
+        headers={"Host": "nats.localhost"},
+        auth=("not-the-worker", "not-the-password"),
+        timeout=5.0,
+    )
+    assert r.status_code == 401, (
+        f"NATS WSS endpoint with wrong basicauth must 401 — caddy is "
+        f"accepting credentials it should reject. Got HTTP "
+        f"{r.status_code}: {r.text[:200]}"
+    )
