@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from axis_control.domain.commands import Command, CommandStatus, CommandType
-from axis_control.domain.models import Instance, InstanceStatus, Project
+from axis_control.domain.models import Instance, Project, WorkloadState
 
 
 class CommandsRepository:
@@ -133,20 +133,23 @@ class InstancesRepository:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO instances "
-                "(id, project_id, project_name, hostname, status, created_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
+                "(id, project_id, project_name, hostname, workload_state, "
+                "created_at, last_heartbeat_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 instance.id,
                 instance.project_id,
                 instance.project_name,
                 instance.hostname,
-                instance.status.value,
+                instance.workload_state.value,
                 instance.created_at,
+                instance.last_heartbeat_at,
             )
 
     async def get(self, instance_id: UUID) -> Instance | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, project_id, project_name, hostname, status, created_at "
+                "SELECT id, project_id, project_name, hostname, "
+                "workload_state, created_at, last_heartbeat_at "
                 "FROM instances WHERE id = $1",
                 instance_id,
             )
@@ -157,16 +160,30 @@ class InstancesRepository:
             project_id=row["project_id"],
             project_name=row["project_name"],
             hostname=row["hostname"],
-            status=InstanceStatus(row["status"]),
+            workload_state=WorkloadState(row["workload_state"]),
             created_at=row["created_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
         )
 
-    async def update_status(
-        self, instance_id: UUID, status: InstanceStatus
+    async def update_workload_state(
+        self, instance_id: UUID, workload_state: WorkloadState
     ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE instances SET status = $1 WHERE id = $2",
-                status.value,
+                "UPDATE instances SET workload_state = $1 WHERE id = $2",
+                workload_state.value,
+                instance_id,
+            )
+
+    async def update_last_heartbeat_at(
+        self, instance_id: UUID, heartbeat_at: datetime
+    ) -> None:
+        """Bump the freshness timestamp for an instance. No-op if no row
+        matches — heartbeats from unknown instances are dropped silently,
+        since we do not auto-register from the heartbeat channel."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE instances SET last_heartbeat_at = $1 WHERE id = $2",
+                heartbeat_at,
                 instance_id,
             )

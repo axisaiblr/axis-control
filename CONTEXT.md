@@ -73,14 +73,18 @@ synonyms; if a new concept appears, add it here.
 - **Timeout sweeper** — background task that fails pending commands
   older than `command_timeout_seconds` with the stable reason
   `no_acknowledgement_within_timeout`. Does not change instance state.
-- **Heartbeat** *(planned, #3)* — periodic liveness signal published by
-  the agent on `heartbeat.<id>`. Drives the reachability axis of the
-  instance state.
-- **Workload state** *(planned, #3)* — the operator's last-expressed
-  intent for an instance (`enabled` / `disabled`). Orthogonal to
-  reachability.
-- **Reachability** *(planned, #3)* — derived from `last_heartbeat_at`
-  (`online` / `offline` / `unknown`). Not stored; computed on read.
+- **Heartbeat** — periodic liveness signal published by the agent on
+  `heartbeat.<id>`, every `AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS`
+  (default 10 s) plus one immediate beat at startup. Drives the
+  reachability axis of the instance state.
+- **Workload state** — the operator's last-expressed intent for an
+  instance (`unknown` / `enabled` / `disabled`). Stored on the instance
+  row. Only flipped by a successful enable/disable command — survives
+  the agent going offline.
+- **Reachability** — derived from `last_heartbeat_at`
+  (`unknown` / `online` / `offline`); offline once the heartbeat is
+  older than `AXIS_CONTROL_HEARTBEAT_STALE_SECONDS` (default 30 s).
+  Not stored; computed on read.
 
 ## NATS subject taxonomy
 
@@ -88,8 +92,9 @@ synonyms; if a new concept appears, add it here.
   Agent subscribes after startup.
 - `status.<instance_id>` — agent → control plane. Outcome of a command.
   Control plane subscribes with wildcard `status.>`.
-- `heartbeat.<instance_id>` *(planned, #3)* — agent → control plane.
-  Periodic, every ~10 s. Wildcard `heartbeat.>`.
+- `heartbeat.<instance_id>` — agent → control plane. Periodic, every
+  `AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS` (default 10 s). Control plane
+  subscribes with wildcard `heartbeat.>`.
 
 ## Repository layout
 
@@ -108,8 +113,9 @@ adapters/services leak FastAPI types or asyncpg types into `domain`.
 
 ## What's built (v0.1)
 
-End-to-end disable / enable loop, plus agent self-registration. Covered
-by integration tests against real Postgres + NATS via testcontainers:
+End-to-end disable / enable loop, agent self-registration, and the
+two-axis reachability + workload-state model. Covered by integration
+tests against real Postgres + NATS via testcontainers:
 
 - `POST /api/instances` — register a worker (auto-creates project).
 - `POST /api/instances/{id}/commands` — issue `disable` / `enable`,
@@ -118,11 +124,19 @@ by integration tests against real Postgres + NATS via testcontainers:
   (`LoggingComposeRunner` dry-run by default, `DockerComposeRunner` for
   real), publishes `StatusMessage` on `status.<id>`.
 - Control plane's `StatusSubscriber` finalises the command row and
-  flips instance `status`.
+  flips instance `workload_state` (`enable → enabled`,
+  `disable → disabled`).
 - Agent **self-registers** on first start: reads `project_name` +
   `hostname` + `control_plane_url`, calls the registration endpoint,
   persists the assigned UUID to `state_dir/instance.json`, reuses it
   across restarts. `AXIS_AGENT_INSTANCE_ID` remains as an override.
+- Agent publishes a `HeartbeatMessage` on `heartbeat.<id>` immediately
+  after subscribing to commands, then every
+  `AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS`. Control plane's
+  `HeartbeatSubscriber` updates `instances.last_heartbeat_at`, and the
+  API derives `reachability` from it. Workload state and reachability
+  move on independent axes — a disabled instance whose agent dies
+  keeps `workload_state: disabled` and flips to `reachability: offline`.
 
 Console scripts: `axis-control`, `axis-agent`. Both load config from
 env (`AXIS_CONTROL_*`, `AXIS_AGENT_*`) and a `.env` file. Idempotent
@@ -130,17 +144,19 @@ schema is applied on startup. Graceful SIGINT/SIGTERM shutdown.
 
 Agent deep modules: `identity.AgentIdentityStore` (file-backed JSON),
 `control_plane.ControlPlaneClient` (thin httpx wrapper),
-`registration.ensure_identity` (override → load → register-with-backoff).
+`registration.ensure_identity` (override → load → register-with-backoff),
+`heartbeat.HeartbeatPublisher` (immediate beat + interval loop).
+
+Control deep modules added for the reachability split:
+`adapters.nats_heartbeat.HeartbeatSubscriber` (wildcard `heartbeat.>`,
+bumps `last_heartbeat_at` on receipt), `domain.models.reachability_of`
+(pure function over `last_heartbeat_at + now + stale_after`).
 
 ## What's in motion (open issues)
 
 Live on GitHub at <https://github.com/axisaiblr/axis-control/issues>.
-
-One remaining `ready-for-agent` item from the first round of real
-usage:
-
-- **#3** *(enhancement)* — split instance status into reachability
-  (heartbeat-driven) and workload state (operator intent).
+No `ready-for-agent` items currently open — the next batch will appear
+after the next round of real usage.
 
 ## What's not yet planned in detail (roadmap)
 

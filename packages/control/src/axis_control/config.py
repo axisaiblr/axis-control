@@ -47,3 +47,10 @@ class ControlSettings(BaseSettings):
         "via NATS request/no-responders. Sets a lower bound on the "
         "happy-path publish latency.",
     )
+    heartbeat_stale_seconds: float = Field(
+        default=30.0,
+        description="An instance whose last_heartbeat_at is older than "
+        "this many seconds is reported as `reachability: offline`. "
+        "Should be a multiple of the agent's heartbeat interval so a "
+        "single missed publish does not flip an instance offline.",
+    )

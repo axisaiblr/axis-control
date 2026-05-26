@@ -77,6 +77,14 @@ class AgentSettings(BaseSettings):
     register_max_backoff: float = Field(default=8.0, ge=0.0)
 
     nats_url: str = Field(default="nats://127.0.0.1:4222")
+    heartbeat_interval_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Interval between heartbeat publishes on "
+        "heartbeat.<instance_id>. Should be a small fraction of the "
+        "control plane's stale window so a single dropped publish does "
+        "not flip the instance offline.",
+    )
     compose_mode: Literal["logging", "docker"] = Field(
         default="logging",
         description="`logging` = dry-run (safe default). "

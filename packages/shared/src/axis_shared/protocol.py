@@ -65,3 +65,25 @@ class StatusMessage(BaseModel):
     @staticmethod
     def subject_wildcard() -> str:
         return "status.>"
+
+
+class HeartbeatMessage(BaseModel):
+    """Periodic liveness signal published by an agent on
+    `heartbeat.<instance_id>`. The control plane updates the matching
+    instance's `last_heartbeat_at` and derives the `reachability`
+    indicator from it. The optional `metadata` blob is reserved for
+    future health payload (CPU, memory, per-project metrics)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    instance_id: UUID
+    agent_version: str
+    metadata: dict[str, str] | None = None
+
+    @staticmethod
+    def subject_for(instance_id: UUID) -> str:
+        return f"heartbeat.{instance_id}"
+
+    @staticmethod
+    def subject_wildcard() -> str:
+        return "heartbeat.>"

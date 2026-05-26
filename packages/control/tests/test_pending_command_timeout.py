@@ -82,9 +82,12 @@ async def test_pending_command_times_out_to_failed_without_agent(
 
     instance_resp = await api_client.get(f"/api/instances/{instance.id}")
     assert instance_resp.status_code == 200
-    # Instance status must remain whatever it was before — the worker is
+    # Workload state must remain whatever it was before — the worker is
     # silent, we don't infer its state from a lost ack.
-    assert instance_resp.json()["status"] == instance.status.value
+    assert (
+        instance_resp.json()["workload_state"]
+        == instance.workload_state.value
+    )
 
 
 @pytest.mark.asyncio
@@ -140,4 +143,7 @@ async def test_late_status_after_timeout_does_not_resurrect_command(
     assert body.get("failure_reason") == "no_acknowledgement_within_timeout"
 
     instance_resp = await api_client.get(f"/api/instances/{instance.id}")
-    assert instance_resp.json()["status"] == instance.status.value
+    assert (
+        instance_resp.json()["workload_state"]
+        == instance.workload_state.value
+    )

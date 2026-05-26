@@ -6,7 +6,7 @@ from typing import Protocol
 from uuid import UUID
 
 from axis_control.domain.commands import CommandStatus, CommandType
-from axis_control.domain.models import InstanceStatus
+from axis_control.domain.models import WorkloadState
 from axis_shared.protocol import StatusMessage
 
 log = logging.getLogger(__name__)
@@ -22,14 +22,14 @@ class CommandsRepoPort(Protocol):
 
 
 class InstancesRepoPort(Protocol):
-    async def update_status(
-        self, instance_id: UUID, status: InstanceStatus
+    async def update_workload_state(
+        self, instance_id: UUID, workload_state: WorkloadState
     ) -> None: ...
 
 
-_TYPE_TO_NEW_STATUS: dict[CommandType, InstanceStatus] = {
-    CommandType.DISABLE: InstanceStatus.DISABLED,
-    CommandType.ENABLE: InstanceStatus.RUNNING,
+_TYPE_TO_WORKLOAD_STATE: dict[CommandType, WorkloadState] = {
+    CommandType.DISABLE: WorkloadState.DISABLED,
+    CommandType.ENABLE: WorkloadState.ENABLED,
 }
 
 
@@ -37,8 +37,9 @@ class StatusHandler:
     """Apply an inbound status report to control-plane state.
 
     On a completed disable/enable command the corresponding instance
-    status flips. On a failed command the instance state is left
-    untouched — the operator decides what to do next.
+    workload state flips. On a failed command the workload state is left
+    untouched — the operator decides what to do next. Reachability is
+    driven separately by heartbeats and is not touched here.
 
     Late status reports (where the command has already reached a terminal
     state, typically via the timeout sweeper) are logged as anomalies and
@@ -69,8 +70,8 @@ class StatusHandler:
             )
             return
         if message.status is CommandStatus.COMPLETED:
-            new_status = _TYPE_TO_NEW_STATUS.get(message.type)
-            if new_status is not None:
-                await self._instances_repo.update_status(
-                    message.instance_id, new_status
+            new_state = _TYPE_TO_WORKLOAD_STATE.get(message.type)
+            if new_state is not None:
+                await self._instances_repo.update_workload_state(
+                    message.instance_id, new_state
                 )

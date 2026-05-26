@@ -17,7 +17,9 @@ async def test_registering_instance_makes_it_retrievable(
     instance_id = body["id"]
     assert body["project_name"] == "text-assistant"
     assert body["hostname"] == "worker-acme-01"
-    assert body["status"] == "unknown"
+    assert body["workload_state"] == "unknown"
+    assert body["reachability"] == "unknown"
+    assert body["last_heartbeat_at"] is None
 
     get_resp = await api_client.get(f"/api/instances/{instance_id}")
     assert get_resp.status_code == 200
@@ -25,4 +27,5 @@ async def test_registering_instance_makes_it_retrievable(
     assert got["id"] == instance_id
     assert got["project_name"] == "text-assistant"
     assert got["hostname"] == "worker-acme-01"
-    assert got["status"] == "unknown"
+    assert got["workload_state"] == "unknown"
+    assert got["reachability"] == "unknown"

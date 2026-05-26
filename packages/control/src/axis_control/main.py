@@ -8,6 +8,7 @@ import asyncpg
 import nats
 import uvicorn
 
+from axis_control.adapters.nats_heartbeat import HeartbeatSubscriber
 from axis_control.adapters.nats_subscriber import StatusSubscriber
 from axis_control.api.app import create_app
 from axis_control.config import ControlSettings
@@ -41,6 +42,7 @@ async def _run(settings: ControlSettings) -> None:
         db_pool=pool,
         nats_client=nc,
         publish_probe_timeout=settings.nats_publish_probe_timeout,
+        heartbeat_stale_seconds=settings.heartbeat_stale_seconds,
     )
     handler = StatusHandler(
         commands_repo=app.state.commands_repo,
@@ -49,6 +51,13 @@ async def _run(settings: ControlSettings) -> None:
     subscriber = StatusSubscriber(nc, handler)
     await subscriber.start()
     log.info("status subscriber attached")
+
+    heartbeat_subscriber = HeartbeatSubscriber(nc, app.state.instances_repo)
+    await heartbeat_subscriber.start()
+    log.info(
+        "heartbeat subscriber attached (stale after %.1fs)",
+        settings.heartbeat_stale_seconds,
+    )
 
     sweeper = CommandTimeoutSweeper(
         commands_repo=app.state.commands_repo,
@@ -92,6 +101,7 @@ async def _run(settings: ControlSettings) -> None:
 
     log.info("shutting down")
     await sweeper.stop()
+    await heartbeat_subscriber.stop()
     await subscriber.stop()
     await nc.drain()
     await pool.close()

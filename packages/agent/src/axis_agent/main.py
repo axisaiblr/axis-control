@@ -13,6 +13,7 @@ from axis_agent.agent import Agent
 from axis_agent.compose_runner import ComposeRunner
 from axis_agent.config import AgentSettings
 from axis_agent.control_plane import ControlPlaneClient
+from axis_agent.heartbeat import HeartbeatPublisher
 from axis_agent.identity import AgentIdentityStore
 from axis_agent.registration import (
     RegistrationFailed,
@@ -20,6 +21,11 @@ from axis_agent.registration import (
     ensure_identity,
 )
 from axis_agent.runners import DockerComposeRunner, LoggingComposeRunner
+
+# Embedded at runtime so the heartbeat metadata can pin an agent build.
+# Kept loose for now — we'll wire it to the package version once we
+# start cutting releases.
+AGENT_VERSION = "0.1.0"
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +95,18 @@ async def _run(settings: AgentSettings) -> None:
         "subscribed; waiting for commands on commands.%s", settings.instance_id
     )
 
+    heartbeat = HeartbeatPublisher(
+        instance_id=settings.instance_id,
+        nats_client=nc,
+        interval_seconds=settings.heartbeat_interval_seconds,
+        agent_version=AGENT_VERSION,
+    )
+    await heartbeat.start()
+    log.info(
+        "heartbeat publisher started (every %.1fs)",
+        settings.heartbeat_interval_seconds,
+    )
+
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -101,6 +119,7 @@ async def _run(settings: AgentSettings) -> None:
         await stop.wait()
     finally:
         log.info("shutting down")
+        await heartbeat.stop()
         await agent.stop()
         await nc.drain()
 

@@ -4,14 +4,22 @@ from axis_control.domain.commands import (
     CommandType,
     new_command,
 )
-from axis_control.domain.models import Instance, InstanceStatus, Project
+from axis_control.domain.models import (
+    Instance,
+    Project,
+    Reachability,
+    WorkloadState,
+    reachability_of,
+)
 
 __all__ = [
     "Command",
     "CommandStatus",
     "CommandType",
     "Instance",
-    "InstanceStatus",
     "Project",
+    "Reachability",
+    "WorkloadState",
     "new_command",
+    "reachability_of",
 ]
