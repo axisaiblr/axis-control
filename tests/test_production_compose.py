@@ -52,6 +52,17 @@ INTEGRATION_BASICAUTH_HASH = (
     "$2a$14$AOGr9G.Nxov9UY0JcF..eeJzFE/EvqvqGxMXdZcZ7WrXn2BZx.ahi"
 )
 
+# Worker basicauth (#26) — separate audience and rotation cadence
+# from the operator basicauth above. Hash generated once with
+#   docker run --rm caddy:2-alpine caddy hash-password --plaintext worker-pw
+# and checked in for reproducibility (bcrypt's salt is non-deterministic
+# so any hash that round-trips against the plaintext works).
+INTEGRATION_WORKER_BASICAUTH_USER = "worker"
+INTEGRATION_WORKER_BASICAUTH_PASSWORD = "worker-pw"
+INTEGRATION_WORKER_BASICAUTH_HASH = (
+    "$2a$14$S2kt3Nx8OwKeINhWi7/Me.mIbgUzjomqkAG5baXNJfu7qCWXnnhJy"
+)
+
 # Default marker for everything in this file. Individual integration
 # tests opt in to the heavier marker as well.
 pytestmark = pytest.mark.production_compose
@@ -250,6 +261,105 @@ def test_caddy_env_threads_basicauth_and_allow_cidrs(monkeypatch) -> None:
     assert env.get("ADMIN_ALLOW_CIDRS") == "10.0.0.0/8", (
         "caddy is not receiving ADMIN_ALLOW_CIDRS from the host .env "
         "— the commands-endpoint IP allow-list defaults wide-open (#19)"
+    )
+
+
+def test_caddy_env_threads_worker_basicauth_and_subdomains(monkeypatch) -> None:
+    """Slice 3 (#26): the NATS + vmsingle Caddyfile site-blocks read
+    four additional env vars that must be threaded through from the
+    host `.env` into the caddy container:
+
+      * WORKER_BASICAUTH_USER / _HASH — shared credential for the WSS
+        NATS gateway and the vmsingle remote-write endpoint.
+      * NATS_DOMAIN / VM_DOMAIN — externally-exposed subdomain site
+        addresses. Compose must default each to
+        `<sub>.${ADMIN_DOMAIN}` so an operator who only sets
+        ADMIN_DOMAIN still gets a working stack.
+
+    Without that wiring, the two new site-blocks load with empty
+    site addresses (caddy will refuse to start) or empty basicauth
+    pairs (the gateway accepts no one or everyone, depending on
+    caddy version). Either way the worker-side flow is broken on
+    first start.
+    """
+    monkeypatch.setenv("WORKER_BASICAUTH_USER", "worker")
+    monkeypatch.setenv("WORKER_BASICAUTH_HASH", "WORKER-HASH-PLACEHOLDER")
+    monkeypatch.setenv("ADMIN_DOMAIN", "admin.example.com")
+    # NATS_DOMAIN / VM_DOMAIN deliberately NOT pre-set — we want to
+    # observe the compose defaults.
+    monkeypatch.delenv("NATS_DOMAIN", raising=False)
+    monkeypatch.delenv("VM_DOMAIN", raising=False)
+    config = _compose_config()
+    caddy = _service(config, "caddy")
+    env = _service_env(caddy)
+
+    assert env.get("WORKER_BASICAUTH_USER") == "worker", (
+        "caddy is not receiving WORKER_BASICAUTH_USER from the host "
+        ".env — the NATS / VM site-blocks will load with an empty "
+        "basicauth username (#26)"
+    )
+    assert env.get("WORKER_BASICAUTH_HASH") == "WORKER-HASH-PLACEHOLDER", (
+        "caddy is not receiving WORKER_BASICAUTH_HASH from the host "
+        ".env — basicauth will be gateable by anyone (or no one)"
+    )
+    assert env.get("NATS_DOMAIN") == "nats.admin.example.com", (
+        "NATS_DOMAIN must default to `nats.${ADMIN_DOMAIN}` when not "
+        "explicitly set — got "
+        f"{env.get('NATS_DOMAIN')!r}. An operator who only sets "
+        "ADMIN_DOMAIN should still get a working NATS gateway."
+    )
+    assert env.get("VM_DOMAIN") == "vm.admin.example.com", (
+        "VM_DOMAIN must default to `vm.${ADMIN_DOMAIN}` when not "
+        "explicitly set — got "
+        f"{env.get('VM_DOMAIN')!r}. Same defaulting story as "
+        "NATS_DOMAIN."
+    )
+
+
+def test_nats_service_mounts_nats_conf_and_runs_with_config_flag() -> None:
+    """Slice 3 (#26): the nats service must mount `nats/nats.conf`
+    into the container and invoke nats-server with `--config` so the
+    file is actually read at startup. Without the mount the config
+    file is absent inside the container; without `--config` the
+    binary starts with empty defaults and ignores the file. Either
+    way the WebSocket listener on :8443 fails to come up, and the
+    caddy reverse-proxy from {$NATS_DOMAIN} has no upstream to hit.
+    """
+    config = _compose_config()
+    nats = _service(config, "nats")
+
+    # Volume bind for nats.conf
+    volumes = nats.get("volumes", [])
+    bind_targets = []
+    for vol in volumes:
+        if isinstance(vol, dict):
+            bind_targets.append((vol.get("source", ""), vol.get("target", "")))
+        elif isinstance(vol, str):
+            parts = vol.split(":")
+            if len(parts) >= 2:
+                bind_targets.append((parts[0], parts[1]))
+    nats_conf_mount = any(
+        "nats.conf" in src and target.endswith("nats.conf")
+        for src, target in bind_targets
+    )
+    assert nats_conf_mount, (
+        "nats service must bind-mount `nats/nats.conf` into the "
+        "container — without it the websocket listener has no config "
+        "and caddy's reverse_proxy to nats:8443 hits a refused "
+        "connection (#26). Got volumes: "
+        f"{volumes!r}"
+    )
+
+    # `--config /etc/nats/nats.conf` (or equivalent) on the command
+    command = nats.get("command", [])
+    if isinstance(command, str):
+        joined = command
+    else:
+        joined = " ".join(command)
+    assert "--config" in joined, (
+        "nats service must start with `--config <path>` — without it "
+        "the nats-server ignores the mounted nats.conf entirely. "
+        f"Got command: {command!r}"
     )
 
 
@@ -696,6 +806,18 @@ def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
                 f"BASICAUTH_HASH={INTEGRATION_BASICAUTH_HASH.replace('$', '$$')}",
                 "GRAFANA_DOMAIN=http://grafana.localhost",
                 "ADMIN_ALLOW_CIDRS=0.0.0.0/0",
+                # Worker basicauth (#26). Same `$$`-doubling trick the
+                # operator hash uses — bcrypt segments like `$AOGr9G`
+                # would otherwise be eaten by compose's $-interpolation.
+                # NATS_DOMAIN / VM_DOMAIN are split out from ADMIN_DOMAIN
+                # for the same reason GRAFANA_DOMAIN is: ADMIN_DOMAIN
+                # carries `http://` to opt caddy out of auto-HTTPS, so
+                # `nats.${ADMIN_DOMAIN}` would render as the invalid site
+                # address `nats.http://localhost`.
+                f"WORKER_BASICAUTH_USER={INTEGRATION_WORKER_BASICAUTH_USER}",
+                f"WORKER_BASICAUTH_HASH={INTEGRATION_WORKER_BASICAUTH_HASH.replace('$', '$$')}",
+                "NATS_DOMAIN=http://nats.localhost",
+                "VM_DOMAIN=http://vm.localhost",
             ]
         )
         + "\n",
@@ -779,6 +901,21 @@ class _Stack:
         if remove_volumes:
             args.append("--volumes")
         self._compose(*args, check=False)
+
+    def exec_in(self, service: str, *cmd: str) -> str:
+        """Run a command inside a running service container and return
+        stdout. Used to query the internal vmsingle (not exposed via
+        caddy in any non-write capacity) so an integration test can
+        confirm a remote-written sample actually landed in storage."""
+        proc = self._compose("exec", "-T", service, *cmd, check=False)
+        if proc.returncode != 0:
+            pytest.fail(
+                f"`docker compose exec {service} {' '.join(cmd)}` failed "
+                f"(exit {proc.returncode}):\n"
+                f"--- stdout ---\n{proc.stdout}\n"
+                f"--- stderr ---\n{proc.stderr}"
+            )
+        return proc.stdout
 
 
 @pytest.fixture
@@ -1024,4 +1161,205 @@ def test_operator_facing_caddyfile_behaviors(integration_stack: _Stack) -> None:
     assert r.status_code in (200, 301, 302), (
         f"grafana subdomain did not reverse-proxy to grafana:3000 — "
         f"got HTTP {r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_gates_nats_ws_round_trip(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 4 (#26): a remote worker can publish→subscribe through the
+    caddy-fronted NATS endpoint when it presents the shared worker
+    basicauth credential. The internal nats broker is anonymous on the
+    docker network; caddy is the only gate.
+
+    This is the tracer-bullet for the whole NATS broker exposure
+    feature: it forces every moving part into the test path —
+    Caddyfile site-block for {$NATS_DOMAIN}, the WebSocket reverse-
+    proxy, the basicauth directive, the new nats.conf with a websocket
+    listener, the compose-wiring that mounts nats.conf, and the
+    operator-side env vars. If this round-trip succeeds, the rest of
+    the work is regression-defence.
+
+    The test fixture connects to 127.0.0.1:<caddy_port> with
+    Host: nats.localhost — same trick existing tests use to exercise
+    caddy site routing without needing real DNS or TLS."""
+    import asyncio
+
+    import nats
+
+    async def round_trip() -> str:
+        # nats-py's WebSocket transport reads the Host header from the
+        # URL; to make caddy route to the nats.localhost site block we
+        # need the URL host to be `nats.localhost`. Build a connect URL
+        # that points at 127.0.0.1 but force the Host through nats-py's
+        # `tls_hostname` / server-side mapping is not available — use
+        # an explicit servers= list where the host is nats.localhost
+        # and the port is the kernel-assigned caddy port. `nats.localhost`
+        # resolves to 127.0.0.1 on every OS we deploy on.
+        servers = [
+            f"ws://{INTEGRATION_WORKER_BASICAUTH_USER}:"
+            f"{INTEGRATION_WORKER_BASICAUTH_PASSWORD}"
+            f"@nats.localhost:{integration_stack.caddy_host_port}"
+        ]
+        nc = await nats.connect(servers=servers, connect_timeout=10)
+        try:
+            sub = await nc.subscribe("test.tracer")
+            await nc.flush(timeout=5)
+            await nc.publish("test.tracer", b"hello-worker")
+            msg = await asyncio.wait_for(sub.next_msg(timeout=5), timeout=10)
+            return msg.data.decode()
+        finally:
+            await nc.drain()
+
+    received = asyncio.run(round_trip())
+    assert received == "hello-worker", (
+        f"WSS round-trip through caddy → nats failed at the assertion "
+        f"layer. Connection opened but payload was {received!r}."
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_missing_returns_401_on_nats_ws(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 5 (#26): negative-path defence for the NATS WSS gateway.
+    Without basicauth Caddy must 401 before the WebSocket upgrade gets
+    anywhere near the broker. Plain HTTP GET on the upgrade endpoint
+    is the cheapest reliable probe — Caddy basicauth runs before the
+    upgrade matcher, so a missing Authorization header returns 401
+    regardless of whether the client meant to speak WebSocket. If this
+    test goes red while slice 4 still passes, somebody removed the
+    `basicauth` directive from the {$NATS_DOMAIN} site-block."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/"
+    r = httpx.get(url, headers={"Host": "nats.localhost"}, timeout=5.0)
+    assert r.status_code == 401, (
+        f"NATS WSS endpoint without basicauth must 401 — caddy is "
+        f"letting traffic through to the broker. Got HTTP "
+        f"{r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_wrong_returns_401_on_nats_ws(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 6 (#26): basicauth actually validates the credential —
+    presenting a syntactically-valid but wrong user/password pair must
+    still 401, not pass through because "an Authorization header is
+    present". Defends against future Caddyfile edits that accidentally
+    weaken the directive (e.g. flipping the order so the matcher
+    short-circuits the check)."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/"
+    r = httpx.get(
+        url,
+        headers={"Host": "nats.localhost"},
+        auth=("not-the-worker", "not-the-password"),
+        timeout=5.0,
+    )
+    assert r.status_code == 401, (
+        f"NATS WSS endpoint with wrong basicauth must 401 — caddy is "
+        f"accepting credentials it should reject. Got HTTP "
+        f"{r.status_code}: {r.text[:200]}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_gates_vmsingle_remote_write(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 7 (#26): a worker pushing metrics through
+    https://vm.${ADMIN_DOMAIN}/api/v1/import/prometheus with the shared
+    worker basicauth lands a sample in vmsingle's storage, queryable
+    over the internal docker network.
+
+    Two-step assertion: the POST returns 2xx (caddy → vmsingle path
+    works), then a /api/v1/query against the *internal* vmsingle
+    returns the written sample. The second step is what proves the
+    bytes survived the round-trip — a 2xx from vmsingle on import
+    means "accepted", not "persisted yet"."""
+    import json
+    import uuid as uuid_mod
+
+    base = f"http://127.0.0.1:{integration_stack.caddy_host_port}"
+    metric_name = f"test_tracer_{uuid_mod.uuid4().hex[:8]}"
+    # Standard Prometheus exposition format. HELP/TYPE comments are
+    # required by some VictoriaMetrics versions for /api/v1/import/prometheus
+    # to accept the sample; they're cheap belt-and-braces here.
+    sample = (
+        f"# HELP {metric_name} tracer metric for the slice-7 test\n"
+        f"# TYPE {metric_name} gauge\n"
+        f"{metric_name} 42\n"
+    ).encode("utf-8")
+
+    write = httpx.post(
+        f"{base}/api/v1/import/prometheus",
+        content=sample,
+        headers={"Host": "vm.localhost", "Content-Type": "text/plain"},
+        auth=(
+            INTEGRATION_WORKER_BASICAUTH_USER,
+            INTEGRATION_WORKER_BASICAUTH_PASSWORD,
+        ),
+        timeout=10.0,
+    )
+    assert 200 <= write.status_code < 300, (
+        f"vmsingle remote-write with correct basicauth must succeed. "
+        f"Got HTTP {write.status_code}: {write.text[:200]}"
+    )
+
+    # vmsingle has a default `-search.latencyOffset=30s` which holds
+    # back recently-ingested samples from instant queries by ~30s.
+    # Poll up to 90 s to clear that window with safety margin.
+    deadline = time.monotonic() + 90
+    last_payload: str = "no attempt"
+    while time.monotonic() < deadline:
+        # Query through the caddy container (alpine, has wget) since
+        # vmsingle's own image either lacks wget or refuses loopback
+        # connects. Docker DNS resolves `vmsingle:8428` inside the
+        # compose network.
+        raw = integration_stack.exec_in(
+            "caddy",
+            "wget", "-qO-",
+            f"http://vmsingle:8428/api/v1/query?query={metric_name}",
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            last_payload = raw[:200]
+            time.sleep(1)
+            continue
+        result = payload.get("data", {}).get("result", [])
+        if result:
+            assert result[0]["value"][1] == "42", (
+                f"vmsingle returned the metric but with the wrong value: "
+                f"{result[0]['value']}"
+            )
+            return
+        last_payload = raw[:200]
+        time.sleep(1)
+    pytest.fail(
+        f"vmsingle never returned the written sample within 30s. "
+        f"Last query payload: {last_payload}"
+    )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_missing_returns_401_on_vm_remote_write(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 8 (#26): symmetric negative-path for the vmsingle write
+    endpoint. Without basicauth caddy must 401 before the body reaches
+    vmsingle — workers leaking metrics to anyone who can reach the
+    subdomain would be a substantial information disclosure."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/api/v1/import/prometheus"
+    r = httpx.post(
+        url,
+        content=b"open_sesame 1\n",
+        headers={"Host": "vm.localhost"},
+        timeout=5.0,
+    )
+    assert r.status_code == 401, (
+        f"vmsingle remote-write without basicauth must 401 — caddy is "
+        f"letting traffic through. Got HTTP {r.status_code}: "
+        f"{r.text[:200]}"
     )
