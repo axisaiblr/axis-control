@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Operator-facing Caddyfile (#19). The previously-minimal
+  `caddy/Caddyfile` now ships a separate `grafana.${ADMIN_DOMAIN}`
+  site block (subdomain rather than path prefix, sidestepping the
+  `GF_SERVER_ROOT_URL` / `serve_from_sub_path` footgun), basicauth on
+  every admin-API path except `POST /api/instances` (token-gated by
+  the app, agents must keep registering) and `/healthz` (docker
+  healthchecks + external monitors), and a `remote_ip` allow-list on
+  the destructive `POST /api/instances/*/commands` endpoint scoped by
+  the new `ADMIN_ALLOW_CIDRS` env (default `0.0.0.0/0` so a stack
+  configured with only basicauth still boots). Credentials and CIDRs
+  thread through compose from `.env`; `.env.example` carries the
+  `caddy hash-password` recipe and the `$$`-escape warning required
+  for bcrypt hashes inside docker-compose env files.
+- New `GRAFANA_DOMAIN` env override on the caddy service. Defaults to
+  `grafana.${ADMIN_DOMAIN}` so the production case needs no extra
+  config, but operators who put a scheme on `ADMIN_DOMAIN` (e.g.
+  `http://localhost` for a sanity check) can pin a valid grafana
+  site address separately.
+- New static test file `tests/test_caddyfile.py` (marker:
+  `production_compose`) parses `caddy/Caddyfile` and `.env.example`,
+  asserting the grafana site address, basicauth env interpolations,
+  IP allow-list matcher, dedicated `/healthz` handle, and `.env.example`
+  documentation are all present. Extended
+  `tests/test_production_compose.py` with a new integration smoke
+  (`test_operator_facing_caddyfile_behaviors`) that brings the full
+  stack up and exercises: bearer-only agent registration through
+  caddy, 401 on unauthenticated admin GET, 200 on basicauth-authed
+  GET, and the grafana subdomain reverse-proxy.
 - Backup story for the management-VPS named volumes (#18). New
   `backup` sidecar in `docker-compose.yml` runs daily `pg_dump` over
   the docker network and tars a VictoriaMetrics snapshot taken via the

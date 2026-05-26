@@ -41,6 +41,17 @@ INTEGRATION_IMAGE_TAG = "integration-test"
 INTEGRATION_FULL_IMAGE = f"ghcr.io/axisaiblr/axis-control:{INTEGRATION_IMAGE_TAG}"
 INTEGRATION_BACKUP_IMAGE = f"ghcr.io/axisaiblr/axis-backup:{INTEGRATION_IMAGE_TAG}"
 
+# Basicauth credentials wired into the integration stack. The hash was
+# generated once with
+#   docker run --rm caddy:2-alpine caddy hash-password --plaintext test-pw
+# bcrypt is non-deterministic (cost-14 salt) so any valid hash for the
+# same plaintext works; this one is checked in for reproducibility.
+INTEGRATION_BASICAUTH_USER = "operator"
+INTEGRATION_BASICAUTH_PASSWORD = "test-pw"
+INTEGRATION_BASICAUTH_HASH = (
+    "$2a$14$AOGr9G.Nxov9UY0JcF..eeJzFE/EvqvqGxMXdZcZ7WrXn2BZx.ahi"
+)
+
 # Default marker for everything in this file. Individual integration
 # tests opt in to the heavier marker as well.
 pytestmark = pytest.mark.production_compose
@@ -192,6 +203,53 @@ def test_vmsingle_has_persistent_volume() -> None:
     )
     assert _published_host_ports(vm) == set(), (
         "vmsingle should be reachable only inside the docker network"
+    )
+
+
+def test_caddy_env_threads_basicauth_and_allow_cidrs(monkeypatch) -> None:
+    """The expanded operator-facing Caddyfile (#19) reads three new
+    environment variables that must be threaded through from the host
+    `.env` into the caddy container:
+
+      * BASICAUTH_USER / BASICAUTH_HASH — admin API credentials.
+      * ADMIN_ALLOW_CIDRS — operator IP allow-list for the destructive
+        commands endpoint.
+
+    `docker compose config` ships these only if the compose file
+    references them in caddy's `environment:` block. Without that
+    wiring, `{$BASICAUTH_USER}` etc. expand to the empty string at
+    Caddy load time and the basicauth directive silently accepts no
+    one (or rejects everyone, depending on Caddy version).
+
+    The test pre-sets the host env so the variables are non-empty in
+    the rendered config — that's how the operator's filled-in `.env`
+    will look in production."""
+    # `docker compose config` escapes literal `$` in env values to `$$`
+    # in its rendered output (so the rendered YAML is round-trip-safe
+    # against compose's own interpolation). The container itself sees
+    # the de-escaped value, but the test inspects the rendered YAML —
+    # so use $-free sentinels that survive compose's normalisation
+    # unchanged.
+    monkeypatch.setenv("BASICAUTH_USER", "operator")
+    monkeypatch.setenv("BASICAUTH_HASH", "BCRYPT-HASH-PLACEHOLDER")
+    monkeypatch.setenv("ADMIN_ALLOW_CIDRS", "10.0.0.0/8")
+    config = _compose_config()
+    caddy = _service(config, "caddy")
+    env = _service_env(caddy)
+
+    assert env.get("BASICAUTH_USER") == "operator", (
+        "caddy is not receiving BASICAUTH_USER from the host .env — "
+        "the Caddyfile basicauth directive will load with an empty "
+        "username (#19)"
+    )
+    assert env.get("BASICAUTH_HASH") == "BCRYPT-HASH-PLACEHOLDER", (
+        "caddy is not receiving BASICAUTH_HASH from the host .env — "
+        "the Caddyfile basicauth directive will load with an empty "
+        "password hash (#19)"
+    )
+    assert env.get("ADMIN_ALLOW_CIDRS") == "10.0.0.0/8", (
+        "caddy is not receiving ADMIN_ALLOW_CIDRS from the host .env "
+        "— the commands-endpoint IP allow-list defaults wide-open (#19)"
     )
 
 
@@ -624,6 +682,20 @@ def _write_integration_env(tmpdir: Path, caddy_host_port: int) -> Path:
                 "AXIS_BACKUP_S3_BUCKET=integration-bucket",
                 "AXIS_BACKUP_S3_ACCESS_KEY_ID=integration-key",
                 "AXIS_BACKUP_S3_SECRET_ACCESS_KEY=integration-secret",
+                # Operator-facing Caddyfile (#19). The grafana site
+                # address must NOT inherit ADMIN_DOMAIN's `http://`
+                # prefix — caddy rejects `grafana.http://localhost`
+                # as a site address. ADMIN_ALLOW_CIDRS defaults wide-
+                # open at compose level; spell that out here for the
+                # benefit of readers grepping for it.
+                f"BASICAUTH_USER={INTEGRATION_BASICAUTH_USER}",
+                # Compose interpolates `$VAR` references in `.env`
+                # values. Bcrypt hashes embed segments like `$AOGr9G`
+                # that compose otherwise eats — escape every `$` as
+                # `$$` so the literal hash survives unchanged.
+                f"BASICAUTH_HASH={INTEGRATION_BASICAUTH_HASH.replace('$', '$$')}",
+                "GRAFANA_DOMAIN=http://grafana.localhost",
+                "ADMIN_ALLOW_CIDRS=0.0.0.0/0",
             ]
         )
         + "\n",
@@ -734,11 +806,15 @@ def _retry_get(
     host_header: str,
     timeout: float = 90.0,
     interval: float = 1.5,
+    auth: tuple[str, str] | None = None,
 ) -> httpx.Response:
     """Poll `url` (with `Host: host_header`) until it returns 2xx or
     `timeout` elapses. Caddy's site blocks match on Host, so the test
     connects to 127.0.0.1 but advertises the configured admin domain
     — the same routing path real clients exercise.
+
+    `auth` is forwarded to httpx as a `(user, password)` tuple for
+    basicauth-protected endpoints; omit it for the public ones.
 
     The error surfaced on timeout names what actually went wrong
     (connection refused vs 5xx vs unmatched-vhost empty 200) so a
@@ -748,7 +824,7 @@ def _retry_get(
     headers = {"Host": host_header}
     while time.monotonic() < deadline:
         try:
-            r = httpx.get(url, headers=headers, timeout=3.0)
+            r = httpx.get(url, headers=headers, timeout=3.0, auth=auth)
             if 200 <= r.status_code < 300 and r.content:
                 return r
             if 200 <= r.status_code < 300:
@@ -830,9 +906,13 @@ def test_volumes_persist_across_stack_restart(
         stack.up()
 
         # 4. The same instance must still be there after the restart.
+        # `/api/instances/{id}` sits behind caddy basicauth (#19), so
+        # the GET must present the operator credentials wired into the
+        # integration env file.
         r = _retry_get(
             f"{base_url}/api/instances/{instance_id}",
             host_header=host_header,
+            auth=(INTEGRATION_BASICAUTH_USER, INTEGRATION_BASICAUTH_PASSWORD),
         )
         assert r.status_code == 200
         body = r.json()
@@ -852,3 +932,96 @@ def test_caddy_routes_healthz_to_axis_control(integration_stack: _Stack) -> None
     url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/healthz"
     response = _retry_get(url, host_header="localhost")
     assert response.json() == {"status": "ok"}, response.text
+
+
+@pytest.mark.production_compose_integration
+def test_operator_facing_caddyfile_behaviors(integration_stack: _Stack) -> None:
+    """End-to-end smoke for the operator-facing Caddyfile (#19):
+
+      1. POST /api/instances is reachable with only a bearer token —
+         agents must keep registering after caddy gains basicauth.
+      2. GET /api/instances/{id} without basicauth returns 401 — the
+         admin inventory is no longer reachable from the open internet.
+      3. GET /api/instances/{id} with basicauth returns 200 — operators
+         with the shared credential can still see the fleet.
+      4. The grafana subdomain reverse-proxies to grafana — dashboards
+         are reachable on the same VPS through caddy.
+
+    Bundled into one stack lifetime to amortise the ~30 s startup. A
+    failure in any step names the specific behaviour that broke."""
+    base_url = f"http://127.0.0.1:{integration_stack.caddy_host_port}"
+    admin_host = "localhost"
+    grafana_host = "grafana.localhost"
+
+    # (1) Register an instance — agent flow, no basicauth, only the
+    # bootstrap bearer token (#8). Retry until the app is up.
+    deadline = time.monotonic() + 90
+    instance_id: str | None = None
+    last_err = "no attempt"
+    while time.monotonic() < deadline and instance_id is None:
+        try:
+            r = httpx.post(
+                f"{base_url}/api/instances",
+                json={
+                    "project_name": "caddy-smoke",
+                    "hostname": "caddy-smoke-1",
+                },
+                headers={
+                    "Host": admin_host,
+                    "Authorization": "Bearer integration-token",
+                },
+                timeout=5.0,
+            )
+            if r.status_code == 201:
+                instance_id = r.json()["id"]
+            else:
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except httpx.HTTPError as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+        if instance_id is None:
+            time.sleep(1.5)
+    assert instance_id, (
+        f"agent registration through caddy never succeeded — POST "
+        f"/api/instances should bypass basicauth (only bearer token "
+        f"required). Last error: {last_err}"
+    )
+
+    # (2) Unauthenticated GET on the admin inventory must be blocked.
+    r = httpx.get(
+        f"{base_url}/api/instances/{instance_id}",
+        headers={"Host": admin_host},
+        timeout=5.0,
+    )
+    assert r.status_code == 401, (
+        f"GET /api/instances/{{id}} without basicauth must 401 — caddy "
+        f"basicauth is not gating the admin API as expected. Got "
+        f"HTTP {r.status_code}: {r.text[:200]}"
+    )
+
+    # (3) Same GET with the operator credentials passes.
+    r = httpx.get(
+        f"{base_url}/api/instances/{instance_id}",
+        headers={"Host": admin_host},
+        auth=(INTEGRATION_BASICAUTH_USER, INTEGRATION_BASICAUTH_PASSWORD),
+        timeout=5.0,
+    )
+    assert r.status_code == 200, (
+        f"GET /api/instances/{{id}} with basicauth must 200 — the "
+        f"operator's shared credential is not being accepted. Got "
+        f"HTTP {r.status_code}: {r.text[:200]}"
+    )
+    assert r.json()["id"] == instance_id
+
+    # (4) Grafana subdomain. Grafana's landing page is `GET /` which
+    # redirects to /login (302) when unauthenticated; both responses
+    # prove caddy is reverse-proxying to grafana:3000 successfully.
+    r = httpx.get(
+        f"{base_url}/",
+        headers={"Host": grafana_host},
+        follow_redirects=False,
+        timeout=10.0,
+    )
+    assert r.status_code in (200, 301, 302), (
+        f"grafana subdomain did not reverse-proxy to grafana:3000 — "
+        f"got HTTP {r.status_code}: {r.text[:200]}"
+    )

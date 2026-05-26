@@ -236,9 +236,38 @@ up -d`. Verified by `tests/test_production_compose.py`: static checks
 (marker `production_compose`) parse the rendered config and assert
 each service's image / volumes / ports / wiring; the slower
 `production_compose_integration` tests bring the stack up, exercise
-`caddy → axis-control:/healthz`, and confirm postgres data survives
-`down && up`. Grafana provisioning and the full operator-facing
-Caddyfile (grafana routing, basic auth, etc.) are follow-ups.
+`caddy → axis-control:/healthz` plus the operator-facing Caddyfile
+behaviours (basicauth gate, agent-registration bypass, grafana
+subdomain), and confirm postgres data survives `down && up`. Grafana
+dashboard / datasource provisioning remains a follow-up.
+
+**Operator-facing Caddyfile** (#19) layers three protections on the
+admin domain:
+
+- **Grafana on `${GRAFANA_DOMAIN}`** — defaults to
+  `grafana.${ADMIN_DOMAIN}` via compose, reverse-proxied to
+  `grafana:3000`. Subdomain rather than path prefix sidesteps the
+  `GF_SERVER_ROOT_URL` / `serve_from_sub_path` Grafana gotcha.
+- **Basicauth on the admin API** — `{$BASICAUTH_USER}` /
+  `{$BASICAUTH_HASH}` from the host `.env`. Scope is everything on
+  the admin domain *except* `POST /api/instances` (token-gated by the
+  app — agents must register without operator creds) and `/healthz`
+  (docker healthcheck + external monitors). Hash is bcrypt, generated
+  with `caddy hash-password`; the `$` characters in the hash MUST be
+  doubled to `$$` in the `.env` file or compose interpolates them
+  away (recipe + warning in `.env.example`).
+- **IP allow-list on the destructive commands path** —
+  `POST /api/instances/*/commands` additionally requires the client
+  IP to fall inside `{$ADMIN_ALLOW_CIDRS}` (space-separated CIDRs,
+  default `0.0.0.0/0`). 403 to anything outside even with valid
+  basicauth.
+
+Long-poll-safe / SSE-friendly tweaks (no buffering, raised
+read-timeout for streamed responses) remain a follow-up — the
+existing `reverse_proxy` defaults are fine until a streaming endpoint
+ships on the control plane. Static checks in
+`tests/test_caddyfile.py`; behavioural checks in
+`tests/test_production_compose.py::test_operator_facing_caddyfile_behaviors`.
 
 **Backup.** The `backup` sidecar (#18) runs a cron loop on the
 management VPS — default schedule `0 2 * * *` UTC, override via

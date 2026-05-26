@@ -75,8 +75,27 @@ services:
       - axis_caddy_config:/config
     environment:
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:-localhost}
+      # Grafana subdomain site address (#19). Defaults to
+      # `grafana.${ADMIN_DOMAIN}` for the production case where
+      # ADMIN_DOMAIN is a bare hostname like `admin.example.com`. If
+      # ADMIN_DOMAIN carries a scheme (e.g. `http://localhost` in dev)
+      # set GRAFANA_DOMAIN explicitly — `grafana.http://localhost` is
+      # not a valid caddy site address.
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-grafana.${ADMIN_DOMAIN:-localhost}}
+      # Basicauth credentials for the admin API (#19). Hash is bcrypt;
+      # generate one with `docker run --rm caddy:2-alpine caddy hash-password`.
+      # Without these set, the Caddyfile loads basicauth with an empty
+      # credential set — every admin-API request 401s.
+      BASICAUTH_USER: ${BASICAUTH_USER}
+      BASICAUTH_HASH: ${BASICAUTH_HASH}
+      # IP allow-list for /api/instances/*/commands (#19). Space-separated
+      # CIDRs (e.g. "1.2.3.4/32 5.6.7.0/24"). Default `0.0.0.0/0` keeps
+      # the endpoint reachable for operators who have not yet built an
+      # allow-list — basicauth alone is still required.
+      ADMIN_ALLOW_CIDRS: ${ADMIN_ALLOW_CIDRS:-0.0.0.0/0}
     depends_on:
       - axis-control
+      - grafana
 
   vmsingle:
     image: victoriametrics/victoria-metrics:v1.106.1
