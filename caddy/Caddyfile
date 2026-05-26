@@ -21,6 +21,55 @@
 	}
 }
 
+# NATS broker exposure to remote workers (#26, ADR-0001). Caddy
+# terminates TLS, gates with the shared `WORKER_BASICAUTH_*`
+# credential, and reverse-proxies the WebSocket upgrade onto the
+# internal `ws://nats:8443` listener. The broker itself stays
+# anonymous on the docker network; basicauth is the only gate.
+# `reverse_proxy` handles WebSocket upgrades transparently — no
+# extra directive needed beyond pointing at the upstream.
+# Requires DNS for `nats.${ADMIN_DOMAIN}` on the VPS.
+{$NATS_DOMAIN} {
+	basicauth {
+		{$WORKER_BASICAUTH_USER} {$WORKER_BASICAUTH_HASH}
+	}
+	reverse_proxy nats:8443
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# vmsingle remote-write exposure (#26, ADR-0001). Symmetric with the
+# NATS site-block above: caddy terminates TLS, gates with the shared
+# `WORKER_BASICAUTH_*` credential, and reverse-proxies onto vmsingle.
+# Deliberately write-only — only the Prometheus / VM import endpoints
+# are routed. Query (`/api/v1/query`, `/api/v1/query_range`) and admin
+# (`/internal/*`, `/debug/*`) stay on the internal docker network for
+# Grafana to consume; exposing them would leak fleet observability
+# to anyone who can present the worker basicauth pair.
+# Requires DNS for `vm.${ADMIN_DOMAIN}` on the VPS.
+{$VM_DOMAIN} {
+	basicauth {
+		{$WORKER_BASICAUTH_USER} {$WORKER_BASICAUTH_HASH}
+	}
+
+	@write path /api/v1/write /api/v1/import /api/v1/import/* /api/v2/write /write
+	handle @write {
+		reverse_proxy vmsingle:8428
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
 {$ADMIN_DOMAIN} {
 	# /healthz is reachable without auth — caddy's own healthcheck,
 	# external uptime monitors, and a docker-level depends_on probe
