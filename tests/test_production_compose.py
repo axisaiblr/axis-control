@@ -1103,3 +1103,24 @@ def test_worker_basicauth_gates_nats_ws_round_trip(
         f"WSS round-trip through caddy → nats failed at the assertion "
         f"layer. Connection opened but payload was {received!r}."
     )
+
+
+@pytest.mark.production_compose_integration
+def test_worker_basicauth_missing_returns_401_on_nats_ws(
+    integration_stack: _Stack,
+) -> None:
+    """Slice 5 (#26): negative-path defence for the NATS WSS gateway.
+    Without basicauth Caddy must 401 before the WebSocket upgrade gets
+    anywhere near the broker. Plain HTTP GET on the upgrade endpoint
+    is the cheapest reliable probe — Caddy basicauth runs before the
+    upgrade matcher, so a missing Authorization header returns 401
+    regardless of whether the client meant to speak WebSocket. If this
+    test goes red while slice 4 still passes, somebody removed the
+    `basicauth` directive from the {$NATS_DOMAIN} site-block."""
+    url = f"http://127.0.0.1:{integration_stack.caddy_host_port}/"
+    r = httpx.get(url, headers={"Host": "nats.localhost"}, timeout=5.0)
+    assert r.status_code == 401, (
+        f"NATS WSS endpoint without basicauth must 401 — caddy is "
+        f"letting traffic through to the broker. Got HTTP "
+        f"{r.status_code}: {r.text[:200]}"
+    )
