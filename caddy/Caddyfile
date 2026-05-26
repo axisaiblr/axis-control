@@ -5,13 +5,70 @@
 # this file usable for local production-compose testing; setting it to
 # a real DNS name on the VPS triggers automatic Let's Encrypt issuance
 # the first time the cert is needed.
-#
-# This file ships intentionally minimal. Grafana routing, custom error
-# pages, basic auth, and any rate limiting are follow-ups.
+
+# Grafana on a dedicated subdomain (#19). The subdomain choice (vs a
+# `/grafana` path prefix on the admin domain) avoids the well-known
+# GF_SERVER_ROOT_URL / serve_from_sub_path footgun. The site address
+# is a separate env var so an operator can override it independently
+# of the admin domain — compose defaults it to `grafana.${ADMIN_DOMAIN}`.
+# Requires DNS for that hostname (or a wildcard record) on the VPS.
+{$GRAFANA_DOMAIN} {
+	reverse_proxy grafana:3000
+
+	log {
+		output stdout
+		format console
+	}
+}
 
 {$ADMIN_DOMAIN} {
-	# axis-control is reachable on the docker network by service name.
-	reverse_proxy axis-control:8000
+	# /healthz is reachable without auth — caddy's own healthcheck,
+	# external uptime monitors, and a docker-level depends_on probe
+	# all rely on it returning 200.
+	handle /healthz {
+		reverse_proxy axis-control:8000
+	}
+
+	# Agent self-registration. Stays open at the caddy layer because
+	# the control plane itself token-gates it with
+	# AXIS_CONTROL_REGISTRATION_TOKEN (#8). Caddy matches POST against
+	# the exact path /api/instances so a GET (operator inventory call)
+	# falls through to the basicauth-protected catch-all below.
+	@register {
+		method POST
+		path /api/instances
+	}
+	handle @register {
+		reverse_proxy axis-control:8000
+	}
+
+	# Destructive commands endpoint (#19). Two factors:
+	#   1. basicauth (same shared operator credential as the rest of
+	#      the admin API).
+	#   2. IP allow-list driven by ADMIN_ALLOW_CIDRS. Defaults to
+	#      0.0.0.0/0 so an operator who has not yet configured the
+	#      list still gets a working stack — basicauth alone.
+	# `remote_ip` accepts multiple space-separated CIDRs, so an env
+	# value like "1.2.3.4/32 5.6.7.0/24" expands inline.
+	handle /api/instances/*/commands {
+		@disallowed_ip not remote_ip {$ADMIN_ALLOW_CIDRS:0.0.0.0/0}
+		respond @disallowed_ip "Forbidden" 403
+		basicauth {
+			{$BASICAUTH_USER} {$BASICAUTH_HASH}
+		}
+		reverse_proxy axis-control:8000
+	}
+
+	# Everything else (admin API listings, future admin UI) sits
+	# behind basicauth. Credentials in .env so an operator can rotate
+	# them without rebuilding the image; hash is bcrypt, generated
+	# with `caddy hash-password`.
+	handle {
+		basicauth {
+			{$BASICAUTH_USER} {$BASICAUTH_HASH}
+		}
+		reverse_proxy axis-control:8000
+	}
 
 	# Logs go to stdout (collected by `docker compose logs caddy`).
 	log {
