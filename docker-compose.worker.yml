@@ -1,0 +1,88 @@
+# Worker-VPS stack for one project deploy.
+#
+# Drop this file in next to the project's own docker-compose.yml on a
+# worker VPS. The two are run side by side under the same project name:
+#
+#   export AXIS_AGENT_COMPOSE_FILE=$PWD/docker-compose.yml
+#   docker compose \
+#       -f docker-compose.yml \
+#       -f /path/to/axis/docker-compose.worker.yml \
+#       up -d
+#
+# This template ships ONLY the axis-agent sidecar. The project itself
+# (text-assistant, voice-assistant, …) lives in its own repo and brings
+# its own compose file — we deliberately do not fork or inline it so
+# project teams keep ownership of their deploy spec.
+#
+# How the agent drives the project:
+#   * /var/run/docker.sock is bind-mounted in, so `docker compose` from
+#     inside the agent container talks to the worker host's daemon.
+#   * The host path AXIS_AGENT_COMPOSE_FILE points at is bind-mounted
+#     at the same path inside the agent (read-only). The agent runs
+#     `docker compose -f $AXIS_AGENT_COMPOSE_FILE stop/start` — that
+#     command resolves the file from the agent's filesystem while the
+#     daemon resolves any host paths inside the file natively. One path
+#     = no surprises with build contexts or sibling volume mounts.
+#
+# Required env (set on the worker host, typically via a .env next to
+# this file):
+#   AXIS_AGENT_PROJECT_NAME      Logical project (e.g. text-assistant)
+#   AXIS_AGENT_CONTROL_PLANE_URL Base URL of the management VPS
+#   AXIS_AGENT_NATS_URL          NATS broker URL on the management VPS
+#                                (blocks on #8 — NATS is currently only
+#                                reachable on the management host)
+#   AXIS_AGENT_COMPOSE_FILE      Absolute host path to the project's
+#                                docker-compose.yml
+#
+# Optional env (sensible defaults):
+#   AXIS_AGENT_IMAGE_TAG (default `latest`), AXIS_AGENT_HOSTNAME,
+#   AXIS_AGENT_COMPOSE_PROJECT, AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS,
+#   AXIS_AGENT_LOG_LEVEL.
+#
+# Persistence:
+#   `axis_agent_state` (named volume) holds the assigned instance UUID
+#   so a restart does NOT re-register the worker as a new instance.
+
+services:
+  axis-agent:
+    image: ghcr.io/axisaiblr/axis-agent:${AXIS_AGENT_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      # Required — agent fails fast if any of these are missing.
+      AXIS_AGENT_PROJECT_NAME: ${AXIS_AGENT_PROJECT_NAME}
+      AXIS_AGENT_CONTROL_PLANE_URL: ${AXIS_AGENT_CONTROL_PLANE_URL}
+      AXIS_AGENT_NATS_URL: ${AXIS_AGENT_NATS_URL}
+      AXIS_AGENT_COMPOSE_FILE: ${AXIS_AGENT_COMPOSE_FILE}
+      # Worker default: drive the sibling project's compose for real.
+      # `logging` is a dev-only dry-run that would silently drop every
+      # disable/enable command on a production worker.
+      AXIS_AGENT_COMPOSE_MODE: ${AXIS_AGENT_COMPOSE_MODE:-docker}
+      # Optional overrides — sensible defaults baked into the image.
+      AXIS_AGENT_HOSTNAME: ${AXIS_AGENT_HOSTNAME:-}
+      AXIS_AGENT_COMPOSE_PROJECT: ${AXIS_AGENT_COMPOSE_PROJECT:-}
+      AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS: ${AXIS_AGENT_HEARTBEAT_INTERVAL_SECONDS:-10}
+      AXIS_AGENT_LOG_LEVEL: ${AXIS_AGENT_LOG_LEVEL:-INFO}
+      # Pin the identity-cache directory to the named volume below so
+      # the assigned instance_id survives `docker compose up` cycles.
+      AXIS_AGENT_STATE_DIR: /var/lib/axis-agent
+    volumes:
+      # Drive `docker compose` on the worker host. The agent only ever
+      # reads compose files + sends commands to the daemon, but the
+      # socket gives it root-equivalent access on the host — keep that
+      # in mind when sizing the worker's threat model.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Pass the project's compose file through at the *same* path on
+      # host and in the container. The agent reads it; the daemon (on
+      # the host) resolves any host paths in it — so a single source
+      # of truth for the path means no surprises with build contexts
+      # or sibling volume mounts.
+      - type: bind
+        source: ${AXIS_AGENT_COMPOSE_FILE}
+        target: ${AXIS_AGENT_COMPOSE_FILE}
+        read_only: true
+      # instance.json (the assigned UUID + identity) — persistent so a
+      # restart does not re-register the worker as a new instance.
+      - axis_agent_state:/var/lib/axis-agent
+
+volumes:
+  axis_agent_state:
