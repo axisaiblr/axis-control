@@ -638,6 +638,142 @@ def test_backup_schedule_and_retention_have_sane_defaults() -> None:
     )
 
 
+def test_caddy_extras_volume_is_declared_external() -> None:
+    """#30: cross-stack ingress extension contract — part 1 of 3.
+
+    The shared `axis_caddy_extras` volume MUST be declared at the
+    top-level `volumes:` block with `external: true`. The operator
+    runs `docker volume create axis_caddy_extras` once during VPS
+    bootstrap; a sibling stack (axis-infisical, future admin UI) then
+    mounts that same external volume `:rw` and writes its Caddyfile
+    fragment into it. Both stacks reference the same name; docker
+    looks the volume up globally because it is external.
+
+    Failure modes this pins:
+      * volume omitted entirely → sibling stacks have no place to
+        write fragments and the import glob below is dead code.
+      * declared as a project-namespaced volume (no `external: true`)
+        → docker prefixes the name with the compose project, so the
+        sibling stack mounts a *different* (empty) volume and the
+        Caddyfile import sees nothing.
+    """
+    config = _compose_config()
+    declared = config.get("volumes", {}) or {}
+    assert "axis_caddy_extras" in declared, (
+        "axis_caddy_extras is not declared in the top-level volumes: "
+        "block — sibling compose stacks (axis-infisical first) have "
+        "no shared volume to drop Caddyfile fragments into (#30, "
+        "axis-infisical ADR-0002)"
+    )
+    entry = declared["axis_caddy_extras"] or {}
+    assert entry.get("external") is True or (
+        isinstance(entry.get("external"), dict) and entry["external"]
+    ), (
+        "axis_caddy_extras must be declared `external: true` so the "
+        "name is NOT prefixed by the compose project — a sibling "
+        f"stack must reference the same docker volume. Got: {entry!r}"
+    )
+
+
+def test_caddy_mounts_extras_volume_at_etc_caddy_extras() -> None:
+    """#30: cross-stack ingress extension contract — part 2 of 3.
+
+    The `caddy` service must mount the external `axis_caddy_extras`
+    volume at `/etc/caddy/extras`. That path matches the
+    `import /etc/caddy/extras/*.caddy` directive in caddy/Caddyfile.
+
+    `:ro` is the natural choice on axis-control's side — caddy only
+    reads fragments; the sibling stack writes them. We deliberately do
+    NOT pin read-only here: the issue says ":ro is fine" but does not
+    forbid :rw. Asserting the source name + target path is enough to
+    catch the realistic breakages (typo on the target, drift to a
+    different volume name).
+
+    Failure mode this pins: a refactor renames the mount target, the
+    `import` glob silently matches nothing, and every downstream
+    consumer's UI 404s without any error in the caddy logs.
+    """
+    config = _compose_config()
+    caddy = _service(config, "caddy")
+
+    extras_mount = None
+    for entry in caddy.get("volumes", []):
+        if isinstance(entry, dict) and entry.get("source") == "axis_caddy_extras":
+            extras_mount = entry
+            break
+        if isinstance(entry, str) and entry.split(":")[0] == "axis_caddy_extras":
+            # short form "source:target[:mode]" — normalise
+            parts = entry.split(":")
+            extras_mount = {"source": parts[0], "target": parts[1]}
+            break
+
+    assert extras_mount is not None, (
+        "caddy service is missing the axis_caddy_extras volume mount — "
+        "the Caddyfile's `import /etc/caddy/extras/*.caddy` directive "
+        "has nothing to read from (#30). Without this, sibling stacks "
+        "cannot extend the ingress."
+    )
+    assert extras_mount.get("target") == "/etc/caddy/extras", (
+        "axis_caddy_extras must mount at `/etc/caddy/extras` — the "
+        "exact path the Caddyfile import glob looks at. Got: "
+        f"{extras_mount!r}"
+    )
+
+
+def test_caddy_extra_hosts_maps_host_docker_internal() -> None:
+    """#30: cross-stack ingress extension contract — part 3 of 3.
+
+    The `caddy` service must include
+    `host.docker.internal:host-gateway` in `extra_hosts`. This is how
+    a Caddyfile fragment in the shared extras volume reaches a
+    consumer stack that publishes its app port on `127.0.0.1` of the
+    host (the pattern axis-infisical uses for Infisical's app port).
+
+    Why it must be wired here, not on the sibling stack: the import
+    happens inside *this* caddy container, so the magic hostname
+    must resolve in *this* container's network namespace. Without
+    `extra_hosts`, `host.docker.internal` does not exist on Linux
+    (only on Docker Desktop) and every reverse_proxy onto a
+    host-bound consumer port fails with a DNS error at runtime.
+
+    Failure mode this pins: a Linux deploy where Caddyfile fragments
+    silently 502 because `host.docker.internal` is unresolvable, with
+    no signal at compose-up time.
+    """
+    config = _compose_config()
+    caddy = _service(config, "caddy")
+
+    raw = caddy.get("extra_hosts")
+    assert raw, (
+        "caddy service is missing `extra_hosts` — sibling Caddyfile "
+        "fragments reverse-proxying onto host.docker.internal:<port> "
+        "(the axis-infisical pattern) will fail DNS resolution on "
+        "Linux (#30)"
+    )
+    # `docker compose config` shape-shifts extra_hosts across versions:
+    #   - dict form:  {"host.docker.internal": "host-gateway"}
+    #   - list form with `:`-separator (input syntax preserved)
+    #   - list form with `=`-separator (modern compose's normalisation)
+    # Accept all three.
+    if isinstance(raw, dict):
+        gateway = raw.get("host.docker.internal")
+    else:
+        gateway = None
+        for entry in raw:
+            if entry.startswith("host.docker.internal"):
+                # split on whichever separator is present
+                for sep in ("=", ":"):
+                    if sep in entry:
+                        _, _, gateway = entry.partition(sep)
+                        break
+                break
+    assert gateway == "host-gateway", (
+        "caddy extra_hosts must map `host.docker.internal` -> "
+        "`host-gateway` (docker's magic alias for the host bridge). "
+        f"Got: {raw!r}"
+    )
+
+
 def test_postgres_has_persistent_volume_and_healthcheck() -> None:
     """Postgres data must live on a named volume (so a `docker compose
     down && up` does not wipe the row history) and must expose a
@@ -885,6 +1021,17 @@ class _Stack:
         )
 
     def up(self) -> None:
+        # `axis_caddy_extras` is declared `external: true` in
+        # docker-compose.yml (#30, axis-infisical ADR-0002). In production
+        # the operator runs `docker volume create axis_caddy_extras` once
+        # during VPS bootstrap; mirror that here. `create` is idempotent
+        # (`--label-add` would re-apply labels if we set any; we don't).
+        # Volume is left in place on teardown — it's empty and shared
+        # globally on the host, so removing it would race other test runs.
+        subprocess.run(
+            ["docker", "volume", "create", "axis_caddy_extras"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
         proc = self._compose("up", "-d", "--wait", "--wait-timeout", "180",
                              check=False)
         if proc.returncode != 0:

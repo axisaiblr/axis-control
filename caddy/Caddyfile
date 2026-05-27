@@ -6,6 +6,18 @@
 # a real DNS name on the VPS triggers automatic Let's Encrypt issuance
 # the first time the cert is needed.
 
+# Cross-stack ingress extension (#30, axis-infisical ADR-0002). Any
+# sibling compose stack on the same VPS (axis-infisical first, future
+# admin UIs next) can drop a site-block fragment into the shared
+# external volume `axis_caddy_extras` (mounted here at /etc/caddy/extras)
+# and have it picked up at startup. Empty directory is fine —
+# `import` no-ops cleanly when the glob matches no files. Conflict
+# detection between fragments (two consumers claiming the same site
+# address) is Caddy's job at parse time: startup error, not silent
+# overwrite. Manual reload after dropping a new fragment:
+#   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+import /etc/caddy/extras/*.caddy
+
 # Grafana on a dedicated subdomain (#19). The subdomain choice (vs a
 # `/grafana` path prefix on the admin domain) avoids the well-known
 # GF_SERVER_ROOT_URL / serve_from_sub_path footgun. The site address
