@@ -268,6 +268,31 @@ def test_vmsingle_subdomain_exposes_write_endpoints_only() -> None:
     )
 
 
+def test_caddyfile_imports_extras_glob() -> None:
+    """#30: cross-stack ingress extension. The Caddyfile MUST top-level
+    `import /etc/caddy/extras/*.caddy` so a sibling compose stack on the
+    same VPS (axis-infisical first, future admin UIs next) can drop a
+    site-block fragment into the shared external volume and have it
+    picked up at startup / on `caddy reload`.
+
+    Failure mode this pins: a refactor silently drops the directive and
+    every downstream consumer's UI 404s. The mechanism is the contract;
+    without the import there is no way for sibling stacks to extend the
+    ingress without a coordinated PR on this repo.
+
+    Empty extras dir is fine — `import` no-ops cleanly. Conflict
+    detection between fragments is Caddy's job at parse time (startup
+    error, not silent overwrite); not asserted here.
+    """
+    text = _caddyfile_text()
+    assert "import /etc/caddy/extras/*.caddy" in text, (
+        "Caddyfile is missing the `import /etc/caddy/extras/*.caddy` "
+        "directive — sibling compose stacks (axis-infisical, future "
+        "admin UIs) can no longer extend the ingress without a "
+        "coordinated PR on axis-control (#30, axis-infisical ADR-0002)"
+    )
+
+
 def test_env_example_documents_worker_basicauth_and_subdomains() -> None:
     """Slice 9 (#26): the new operator vars must be in .env.example.
     Without this an operator who copies the file to `.env` will leave

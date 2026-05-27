@@ -102,6 +102,21 @@ synonyms; if a new concept appears, add it here.
   the WebSocket upgrade onto the internal `nats://nats:4222`. Inside
   the management-VPS docker network services keep using the internal
   URL; only agents on remote workers go through the broker URL.
+- **Caddy extras volume** — shared docker volume `axis_caddy_extras`,
+  declared `external: true` in `docker-compose.yml` and mounted on the
+  `caddy` service at `/etc/caddy/extras`. Sibling compose stacks on
+  the same VPS (`axis-infisical` is the first consumer; future admin
+  UIs are next) drop a `*.caddy` site-block fragment into this volume
+  and axis-control's Caddyfile picks it up via the top-level
+  `import /etc/caddy/extras/*.caddy`. Empty directory is fine —
+  `import` no-ops when the glob matches nothing. Conflict detection
+  (two consumers claiming the same site address) is Caddy's job at
+  parse time: startup error, not silent overwrite. Operator bootstrap:
+  `docker volume create axis_caddy_extras` once on the VPS; manual
+  reload after a fragment changes:
+  `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`.
+  Rationale and rejected alternatives in
+  [axis-infisical ADR-0002](https://github.com/axisaiblr/axis-infisical/blob/main/docs/adr/0002-caddy-extras-import-pattern.md).
 - **Worker basicauth** — shared HTTP basicauth pair
   (`WORKER_BASICAUTH_USER` / `WORKER_BASICAUTH_HASH` on the management
   VPS, the matching plaintext password on each worker) gating the
@@ -336,6 +351,14 @@ needs its own design conversation before becoming actionable:
 - **Per-instance NATS broker credential** — migrate from the shared
   `WORKER_BASICAUTH_*` to a per-agent pair pushed into Caddy admin
   API at registration (#27). Builds on #26.
+- **Cross-stack ingress extension** (#30) — generic mechanism for
+  sibling compose stacks on the same VPS (`axis-infisical`, future
+  admin UIs) to publish a subdomain through axis-control's Caddy
+  without a coordinated PR on this repo. Implemented via
+  [[Caddy extras volume]]. Hot-reload watcher and per-fragment
+  basicauth orchestration are open follow-ups, not blockers — see
+  [axis-infisical ADR-0002](https://github.com/axisaiblr/axis-infisical/blob/main/docs/adr/0002-caddy-extras-import-pattern.md)
+  Consequences for the full list.
 
 ## Conventions
 

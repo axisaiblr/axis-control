@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Cross-stack ingress extension via Caddy `import` + shared external
+  volume (#30, axis-infisical ADR-0002). Sibling compose stacks on
+  the management VPS (axis-infisical first, future admin UIs next)
+  can now extend the TLS-443 ingress without a coordinated PR on
+  this repo:
+  * `caddy/Caddyfile` — new top-level `import /etc/caddy/extras/*.caddy`
+    directive picks up every `*.caddy` fragment in the shared volume
+    at startup and on `caddy reload`. Empty directory is fine —
+    `import` no-ops cleanly when the glob matches nothing. Conflict
+    detection between fragments is delegated to Caddy at parse time
+    (startup error, not silent overwrite).
+  * `docker-compose.yml` — new top-level volume `axis_caddy_extras`
+    declared `external: true`, mounted on the `caddy` service at
+    `/etc/caddy/extras` (read-only on this side — axis-control's
+    caddy never writes; the producer is the consumer stack). The
+    `caddy` service also gains
+    `extra_hosts: ["host.docker.internal:host-gateway"]` so a
+    fragment can `reverse_proxy host.docker.internal:<port>` onto a
+    consumer stack that publishes on the host loopback (the pattern
+    axis-infisical uses for Infisical's app port). Without this,
+    `host.docker.internal` does not resolve on Linux — only on
+    Docker Desktop — and every fragment routing through it would
+    silently 502.
+  * `.env.example` — operator-facing note documenting the one-time
+    `docker volume create axis_caddy_extras` bootstrap step required
+    before first `docker compose up` (the external volume is opaque
+    to compose; the operator must pre-create it).
+  * `CONTEXT.md` — new glossary entry `Caddy extras volume` cross-
+    referencing axis-infisical's ADR-0002. Roadmap section gains a
+    `Cross-stack ingress extension (#30)` bullet pointing at the
+    same ADR for the hot-reload-watcher / per-fragment-auth
+    follow-ups.
+  * Two new static tests pinning the contract:
+    - `tests/test_caddyfile.py::test_caddyfile_imports_extras_glob`
+      pins the `import /etc/caddy/extras/*.caddy` directive — a
+      refactor silently dropping it would 404 every downstream
+      consumer's UI.
+    - `tests/test_production_compose.py` adds three asserts: the
+      `axis_caddy_extras` volume is declared `external: true`,
+      mounted on `caddy` at `/etc/caddy/extras`, and
+      `host.docker.internal:host-gateway` is in the caddy service's
+      `extra_hosts`.
+  * Integration-test harness (`tests/test_production_compose.py`)
+    now runs `docker volume create axis_caddy_extras` on every
+    `_Stack.up()` so the existing `production_compose_integration`
+    smoke tests still bring the stack up cleanly against the new
+    external-volume requirement, mirroring the operator's bootstrap
+    step.
+
+### Operator preflight when upgrading from v0.2.0 on the mgmt VPS
+
+- Run once before `docker compose up -d`:
+    docker volume create axis_caddy_extras
+  Without this the stack fails to start (compose refuses to mount an
+  external volume that does not exist). The volume is shared with
+  any consumer stack (axis-infisical, …) that drops Caddyfile
+  fragments into `/etc/caddy/extras`.
+
 ## [0.2.0] - 2026-05-26
 
 First release that can take a real remote worker. The management VPS
