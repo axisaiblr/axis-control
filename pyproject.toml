@@ -1,6 +1,6 @@
 [project]
 name = "axis-control-workspace"
-version = "0.2.0"
+version = "0.3.0"
 description = "AXIS AI control plane: admin panel, command dispatch, metrics."
 requires-python = ">=3.12"
 

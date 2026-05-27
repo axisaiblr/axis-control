@@ -1,6 +1,6 @@
 [project]
 name = "axis-shared"
-version = "0.2.0"
+version = "0.3.0"
 description = "Shared NATS message schemas for axis-control and axis-agent."
 requires-python = ">=3.12"
 dependencies = [

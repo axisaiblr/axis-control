@@ -199,7 +199,7 @@ wheels = [
 
 [[package]]
 name = "axis-agent"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/agent" }
 dependencies = [
     { name = "axis-shared" },
@@ -218,7 +218,7 @@ requires-dist = [
 
 [[package]]
 name = "axis-control"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/control" }
 dependencies = [
     { name = "asyncpg" },
@@ -243,7 +243,7 @@ requires-dist = [
 
 [[package]]
 name = "axis-control-workspace"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -270,7 +270,7 @@ dev = [
 
 [[package]]
 name = "axis-shared"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/shared" }
 dependencies = [
     { name = "pydantic" },

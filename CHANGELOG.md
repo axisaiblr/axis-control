@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-27
+
+Cross-stack ingress extension. axis-control's Caddy now picks up
+site-block fragments from any sibling compose stack on the same VPS
+via `import /etc/caddy/extras/*.caddy`. axis-infisical (the first
+consumer) and any future admin UI can publish a subdomain through
+this Caddy without a coordinated PR on axis-control.
+
 ### Added
 - Cross-stack ingress extension via Caddy `import` + shared external
   volume (#30, axis-infisical ADR-0002). Sibling compose stacks on
