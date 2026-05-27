@@ -8,6 +8,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Cross-stack ingress extension via Caddy `import` + shared external
+  volume (#30, axis-infisical ADR-0002). Sibling compose stacks on
+  the management VPS (axis-infisical first, future admin UIs next)
+  can now extend the TLS-443 ingress without a coordinated PR on
+  this repo:
+  * `caddy/Caddyfile` — new top-level `import /etc/caddy/extras/*.caddy`
+    directive picks up every `*.caddy` fragment in the shared volume
+    at startup and on `caddy reload`. Empty directory is fine —
+    `import` no-ops cleanly when the glob matches nothing. Conflict
+    detection between fragments is delegated to Caddy at parse time
+    (startup error, not silent overwrite).
+  * `docker-compose.yml` — new top-level volume `axis_caddy_extras`
+    declared `external: true`, mounted on the `caddy` service at
+    `/etc/caddy/extras` (read-only on this side — axis-control's
+    caddy never writes; the producer is the consumer stack). The
+    `caddy` service also gains
+    `extra_hosts: ["host.docker.internal:host-gateway"]` so a
+    fragment can `reverse_proxy host.docker.internal:<port>` onto a
+    consumer stack that publishes on the host loopback (the pattern
+    axis-infisical uses for Infisical's app port). Without this,
+    `host.docker.internal` does not resolve on Linux — only on
+    Docker Desktop — and every fragment routing through it would
+    silently 502.
+  * `.env.example` — operator-facing note documenting the one-time
+    `docker volume create axis_caddy_extras` bootstrap step required
+    before first `docker compose up` (the external volume is opaque
+    to compose; the operator must pre-create it).
+  * `CONTEXT.md` — new glossary entry `Caddy extras volume` cross-
+    referencing axis-infisical's ADR-0002. Roadmap section gains a
+    `Cross-stack ingress extension (#30)` bullet pointing at the
+    same ADR for the hot-reload-watcher / per-fragment-auth
+    follow-ups.
+  * Two new static tests pinning the contract:
+    - `tests/test_caddyfile.py::test_caddyfile_imports_extras_glob`
+      pins the `import /etc/caddy/extras/*.caddy` directive — a
+      refactor silently dropping it would 404 every downstream
+      consumer's UI.
+    - `tests/test_production_compose.py` adds three asserts: the
+      `axis_caddy_extras` volume is declared `external: true`,
+      mounted on `caddy` at `/etc/caddy/extras`, and
+      `host.docker.internal:host-gateway` is in the caddy service's
+      `extra_hosts`.
+  * Integration-test harness (`tests/test_production_compose.py`)
+    now runs `docker volume create axis_caddy_extras` on every
+    `_Stack.up()` so the existing `production_compose_integration`
+    smoke tests still bring the stack up cleanly against the new
+    external-volume requirement, mirroring the operator's bootstrap
+    step.
+
+### Operator preflight when upgrading from v0.2.0 on the mgmt VPS
+
+- Run once before `docker compose up -d`:
+    docker volume create axis_caddy_extras
+  Without this the stack fails to start (compose refuses to mount an
+  external volume that does not exist). The volume is shared with
+  any consumer stack (axis-infisical, …) that drops Caddyfile
+  fragments into `/etc/caddy/extras`.
+
+## [0.2.0] - 2026-05-26
+
+First release that can take a real remote worker. The management VPS
+now exposes its NATS broker and vmsingle's remote-write endpoint to
+the public internet through Caddy, gated by a shared HTTP basicauth
+pair (`WORKER_BASICAUTH_*`) and defended in depth by the per-instance
+envelope token from PR #22.
+
+### Added
+- NATS broker network exposure (#26). Two new externally-reachable
+  endpoints, both on port 443, both reverse-proxied by Caddy with
+  TLS terminated upstream:
+  * `wss://nats.${ADMIN_DOMAIN}` — Caddy site-block gates the WebSocket
+    upgrade with HTTP basicauth, then forwards to an internal NATS
+    WebSocket listener (`nats/nats.conf`, port 8443). The broker stays
+    anonymous on the docker network; the gate lives in Caddy.
+  * `https://vm.${ADMIN_DOMAIN}/api/v1/write` (and `/api/v1/import`,
+    `/api/v2/write`) — Caddy site-block gates the remote-write POST
+    with the same basicauth pair, then forwards to `vmsingle:8428`.
+    Query (`/api/v1/query`, `/api/v1/query_range`) and admin
+    endpoints are deliberately NOT routed — they stay on the internal
+    docker network for Grafana to consume, so a leaked worker
+    credential is not a fleet-wide observability leak.
+- New env vars on the management VPS:
+  * `WORKER_BASICAUTH_USER` / `WORKER_BASICAUTH_HASH` — shared HTTP
+    basicauth credential gating both the NATS WSS gateway and the
+    vmsingle remote-write endpoint. Distinct from the operator
+    `BASICAUTH_*` credentials (#19): different audiences (humans vs.
+    machines), different rotation cadence, separate blast radius if
+    either leaks. Threat model is fleet-wide rotation; per-instance
+    migration is tracked in #27.
+  * `NATS_DOMAIN` / `VM_DOMAIN` — Caddy site-address overrides.
+    Default to `nats.${ADMIN_DOMAIN}` / `vm.${ADMIN_DOMAIN}`. Override
+    in dev when `ADMIN_DOMAIN` carries a scheme (e.g. `http://localhost`
+    — `nats.http://localhost` is not a valid Caddy site address).
+- `nats/nats.conf`: new NATS server config with a WebSocket listener
+  on port 8443 alongside the default 4222 client listener. Both
+  anonymous, both internal-only — Caddy is the only ingress.
+- `packages/agent` dependency: `nats-py[aiohttp]>=2.9` — the
+  WebSocket transport requires the aiohttp extras to be installed,
+  otherwise `nats.connect("wss://...")` fails at import-time.
+- ADR-0001 (`docs/adr/0001-nats-broker-exposure.md`) — the decision
+  tree behind option B (WSS through Caddy) over A (direct `:4222`),
+  C (NATS user JWTs), D (mTLS); B.1 (Caddy basicauth) over B.2 / B.3;
+  shared credential over per-instance; subdomain over path.
+- `CONTEXT.md` glossary: new terms `Broker URL` and
+  `Worker basicauth`. Code paths that reach the broker URL externally
+  or reference the worker basicauth use those terms — do not
+  introduce synonyms.
+- Eight new tests in `tests/test_caddyfile.py` +
+  `tests/test_production_compose.py`:
+  * static: NATS site-block has basicauth + reverse_proxy nats:8443;
+    VM site-block has the same auth + write-only routing (no
+    `/api/v1/query` passthrough); compose threads
+    `WORKER_BASICAUTH_*` + `NATS_DOMAIN` + `VM_DOMAIN` into caddy;
+    nats service mounts `nats.conf` and starts with `--config`;
+    `.env.example` documents the new env block + DNS preflight.
+  * integration: WSS publish→subscribe round-trip through real
+    Caddy + NATS; WSS without basicauth returns 401; WSS with wrong
+    basicauth returns 401; vmsingle remote-write happy path
+    (Prometheus-exposition POST + internal `/api/v1/query` returns
+    the sample); vmsingle remote-write without basicauth returns 401.
+- `.env.example` extended with a "Worker exposure: NATS + vmsingle
+  (#26)" section documenting the new credential pair, the DNS
+  preflight (operator must add A-records for `nats.${ADMIN_DOMAIN}`
+  and `vm.${ADMIN_DOMAIN}` alongside `grafana.${ADMIN_DOMAIN}`), the
+  `caddy hash-password` recipe (shared with the operator hash), and
+  the `$`→`$$` doubling rule for compose.
+
+### Changed
+- `docker-compose.yml` nats service no longer ships without auth on
+  an internal-only port (the previous "we'll expose when #8 lands"
+  comment is now obsolete). Instead it loads `nats/nats.conf` to
+  enable the WebSocket listener for the Caddy reverse-proxy.
+- Caddy environment gains four new variables passed through from the
+  host `.env`: `NATS_DOMAIN`, `VM_DOMAIN`, `WORKER_BASICAUTH_USER`,
+  `WORKER_BASICAUTH_HASH`. `NATS_DOMAIN` / `VM_DOMAIN` default to
+  `<sub>.${ADMIN_DOMAIN}` so an operator who only sets `ADMIN_DOMAIN`
+  still gets a working stack.
+- `CONTEXT.md` roadmap: the stale "NATS connection-level auth" bullet
+  is replaced by explicit issue links to #10 (per-project metrics
+  scrape side) and #27 (per-instance basicauth follow-up).
+
+### Operator preflight when upgrading to v0.2.0 on the mgmt VPS
+
+- DNS: add A-records for `nats.${ADMIN_DOMAIN}` and `vm.${ADMIN_DOMAIN}`
+  pointing at the management VPS public IP.
+- `.env`: add `WORKER_BASICAUTH_USER=worker` and
+  `WORKER_BASICAUTH_HASH=<bcrypt>` (`docker run --rm caddy:2-alpine
+  caddy hash-password --plaintext <pw>`, then double every `$` to
+  `$$` before pasting).
+- Hand the plaintext password to every worker VPS as
+  `WORKER_BASICAUTH_PASSWORD` (via Infisical) for the agent's NATS
+  WSS client and vmagent's `basicAuth.password`.
+
+## [0.1.0] - 2026-05-26
+
+First release with a real deploy story: an operator can stand up the
+management VPS from `docker-compose.yml`, register worker agents over
+HTTPS, and get daily backups out the door. NATS broker network exposure
+is **not** yet shipped — workers running on a remote VPS cannot connect
+until #26 lands.
+
+### Added
 - Operator-facing Caddyfile (#19). The previously-minimal
   `caddy/Caddyfile` now ships a separate `grafana.${ADMIN_DOMAIN}`
   site block (subdomain rather than path prefix, sidestepping the

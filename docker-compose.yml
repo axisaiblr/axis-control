@@ -83,6 +83,13 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - axis_caddy_data:/data
       - axis_caddy_config:/config
+      # Cross-stack ingress extension (#30, axis-infisical ADR-0002).
+      # Sibling compose stacks on the same VPS write Caddyfile fragments
+      # (`*.caddy` files) into this shared external volume; caddy reads
+      # them via the top-level `import /etc/caddy/extras/*.caddy` in
+      # caddy/Caddyfile. `:ro` because caddy never writes fragments —
+      # the producers are the consumer stacks.
+      - axis_caddy_extras:/etc/caddy/extras:ro
     environment:
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:-localhost}
       # Grafana subdomain site address (#19). Defaults to
@@ -116,6 +123,15 @@ services:
       # the endpoint reachable for operators who have not yet built an
       # allow-list — basicauth alone is still required.
       ADMIN_ALLOW_CIDRS: ${ADMIN_ALLOW_CIDRS:-0.0.0.0/0}
+    # Cross-stack ingress extension (#30, axis-infisical ADR-0002).
+    # The magic alias `host.docker.internal` does NOT resolve on Linux
+    # by default — only Docker Desktop ships it. Map it explicitly to
+    # `host-gateway` so a Caddyfile fragment in axis_caddy_extras can
+    # `reverse_proxy host.docker.internal:<port>` onto a consumer stack
+    # that publishes its app port on the host loopback (the pattern
+    # axis-infisical uses for Infisical's app port).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - axis-control
       - grafana
@@ -206,3 +222,13 @@ volumes:
   axis_vmsingle_data:
   axis_grafana_data:
   axis_backup_data:
+  # Cross-stack ingress extension (#30, axis-infisical ADR-0002). Shared
+  # external volume into which sibling compose stacks on the same VPS
+  # drop Caddyfile fragments (one `*.caddy` file per stack). axis-control's
+  # caddy imports them via `import /etc/caddy/extras/*.caddy`. Declared
+  # `external: true` so docker resolves the name globally — both this
+  # compose project and the sibling stack mount the SAME volume. The
+  # operator runs `docker volume create axis_caddy_extras` once during
+  # VPS bootstrap; see .env.example.
+  axis_caddy_extras:
+    external: true
